@@ -1,0 +1,57 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ds: <http://darkstar.io/schema#> .
+@prefix hist: <http://darkstar.io/history/1919#> .
+
+ds:Ontology a owl:Ontology ;
+    rdfs:label "Darkstar Advanced Reasoning Test Suite" .
+
+### 1. 복잡한 클래스 표현 (Class Intersection) ###
+ds:Worker a owl:Class .
+ds:Patriot a owl:Class .
+
+# PatriotWorker는 Worker이면서 동시에 Patriot인 교집합(Intersection)으로 정의됨
+ds:PatriotWorker a owl:Class ;
+    owl:intersectionOf ( ds:Worker ds:Patriot ) .
+
+### 2. 속성 체인 (Property Chains) ###
+ds:worksAt a owl:ObjectProperty .
+ds:employs a owl:ObjectProperty ;
+    owl:inverseOf ds:worksAt .
+
+# '동료'라는 속성은 [내가 일하는 곳] -> [그곳이 고용한 사람]의 사슬로 정의됨
+ds:hasColleague a owl:ObjectProperty ;
+    owl:propertyChainAxiom ( ds:worksAt ds:employs ) .
+
+### 3. 고유 키 및 데이터 타입 (Keys & Datatypes) ###
+ds:registrationNumber a owl:DatatypeProperty .
+ds:age a owl:DatatypeProperty .
+
+# Worker 클래스는 registrationNumber를 고유 키(Primary Key)로 가짐
+ds:Worker owl:hasKey ( ds:registrationNumber ) .
+
+### 4. 파편화된 역사 기록 인스턴스 (Test Data) ###
+
+# 기록 A: 종로 운수회사와 고용인 이철수
+hist:Jongno_Transport a owl:NamedIndividual ;
+    ds:employs hist:Lee_Chulsoo .
+
+# 기록 B: 독립운동가이자 노동자인 김아무개 본명 기록
+hist:Kim_Amugae a ds:Worker, ds:Patriot ;
+    rdfs:label "김아무개 (본명)" ;
+    ds:registrationNumber "1919-001" ;
+    ds:age "25"^^xsd:integer ;
+    ds:worksAt hist:Jongno_Transport .
+
+# 기록 C: 다른 문서에서 발견된 별칭 기록 (고의적인 중복 데이터)
+hist:Kim_Rickshaw a ds:Worker ;
+    rdfs:label "인력거꾼 김씨 (별칭)" ;
+    ds:registrationNumber "1919-001" ;  # 김아무개와 동일한 고유 키 보유!
+    ds:age "025"^^xsd:integer .         # 25와 025 (표현은 다르나 숫자 값은 같음)
+
+# 기록 D: 이철수 기본 정보
+hist:Lee_Chulsoo a ds:Worker ;
+    rdfs:label "이철수" ;
+    ds:registrationNumber "1919-002" .

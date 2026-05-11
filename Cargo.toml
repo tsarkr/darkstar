@@ -1,0 +1,36 @@
+[package]
+name = "darkstar"
+version = "0.1.0"
+edition = "2021"
+description = "Professional OWL 2 RL Ontology Editor & Inference Engine"
+authors = ["Ontology Team"]
+repository = "https://github.com/user/darkstar"
+
+[dependencies]
+image = "0.25"
+sophia = "0.8"
+rayon = "1.10"
+tokio = { version = "1.36", features = ["full"] }
+uuid = { version = "1.8", features = ["v4"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+eframe = "0.29"
+rfd = "0.14"
+egui_dock = "0.14"
+directories = "5.0"
+
+[package.metadata.packager]
+name = "Darkstar"
+identifier = "com.darkstar.ontology.editor"
+version = "0.1.0"
+authors = ["Darkstar Team"]
+description = "Professional OWL 2 RL Ontology Editor"
+copyright = "Copyright © 2026 Darkstar Team"
+category = "DeveloperTool"
+icons = ["assets/icon.png", "assets/icon.icns"]
+formats = ["dmg", "app", "wix", "nsis"]
+
+[package.metadata.packager.macos]
+minimum_system_version = "11.0"
+
+[package.metadata.packager.windows]
