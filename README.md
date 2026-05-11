@@ -77,8 +77,8 @@ cargo run --release
 
 ## License / 라이선스
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+TBD (To Be Determined) / 미정
 
 ## Authors / 작성자
 
-- **Darkstar Team** - *Professional OWL 2 RL Ontology Editor*
+- **Gyungmin**
