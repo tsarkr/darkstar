@@ -59,6 +59,7 @@ struct GraphFilters {
     layout_mode: LayoutMode,
     focus_mode: bool,
     expansion_depth: usize,
+    show_system: bool,
 }
 
 impl Default for GraphFilters {
@@ -71,6 +72,7 @@ impl Default for GraphFilters {
             layout_mode: LayoutMode::ForceDirected,
             focus_mode: true,
             expansion_depth: 1,
+            show_system: false,
         }
     }
 }
@@ -110,6 +112,9 @@ struct DarkstarApp {
     renaming_uri: Option<(String, String)>, // (old_uri, new_name_buffer)
     clipboard: Vec<String>,
     selected_individuals: HashSet<String>,
+    confirm_delete_uri: Option<String>,
+    annotation_buffer: Option<(String, String)>, // (uri, buffer)
+    simulation_alpha: f32,
 }
 
 impl DarkstarApp {
@@ -196,6 +201,9 @@ impl DarkstarApp {
             renaming_uri: None,
             clipboard: Vec::new(),
             selected_individuals: HashSet::new(),
+            confirm_delete_uri: None,
+            annotation_buffer: None,
+            simulation_alpha: 1.0,
         }
     }
 
@@ -206,6 +214,13 @@ impl DarkstarApp {
             prefixed_uri
         };
         uri.split('/').last().unwrap_or(uri).split('#').last().unwrap_or(uri).to_string()
+    }
+
+    fn is_object_property(&self, uri: &str) -> bool {
+        let rdf_type = InferenceEngine::make_term("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+        let obj_prop = InferenceEngine::make_term("http://www.w3.org/2002/07/owl#ObjectProperty");
+        let term = InferenceEngine::make_term(uri);
+        self.manager.memory.main_graph.contains(&term, &rdf_type, &obj_prop).unwrap_or(false)
     }
 
     fn sync_graph(&mut self) {
@@ -272,7 +287,14 @@ impl DarkstarApp {
         }
 
         // 3. Build edges with focus and schema filtering
+        let mut seen_triples = std::collections::HashSet::new();
         let mut add_triple = |s: String, p: String, o: String, is_o_literal: bool, is_inferred: bool| {
+            let key = (s.clone(), p.clone(), o.clone());
+            if seen_triples.contains(&key) {
+                return;
+            }
+            seen_triples.insert(key);
+
             if self.filters.focus_mode && (!visible_in_focus.contains(&s) || !visible_in_focus.contains(&o)) {
                 return;
             }
@@ -284,6 +306,7 @@ impl DarkstarApp {
             if !self.filters.show_schema && (s_type == NodeType::Class || o_type == NodeType::Class || s_type == NodeType::Property) { return; }
             if !self.filters.show_individuals && (s_type == NodeType::Individual || o_type == NodeType::Individual) { return; }
 
+            // Filter internal bnodes if not show_system
             seen_nodes.insert(s.clone());
             seen_nodes.insert(o.clone());
             new_edges.push(GraphEdge { from: s, to: o, label: Self::get_label(&p), is_inferred });
@@ -304,16 +327,23 @@ impl DarkstarApp {
         }
 
         // 4. Update nodes
+        let mut new_node_count = 0;
         for uri in &seen_nodes {
             if !self.nodes.contains_key(uri) {
-                let n_len = uri.len() as f32;
+                let angle = new_node_count as f32 * 137.5 * std::f32::consts::PI / 180.0;
+                let radius = (new_node_count as f32).sqrt() * 50.0;
                 self.nodes.insert(uri.clone(), GraphNode {
-                    pos: Vec2::new(n_len * 20.0 % 800.0, n_len * 30.0 % 600.0),
+                    pos: Vec2::new(400.0 + angle.cos() * radius, 300.0 + angle.sin() * radius),
                     vel: Vec2::ZERO,
                     label: Self::get_label(uri),
                     node_type: *node_types.get(uri).unwrap_or(if uri.starts_with("l:") { &NodeType::Literal } else { &NodeType::Individual }),
                 });
+                new_node_count += 1;
             }
+        }
+
+        if new_node_count > 0 {
+            self.simulation_alpha = 10.0; // Boost physics on new nodes
         }
 
         self.nodes.retain(|k, _| seen_nodes.contains(k));
@@ -593,7 +623,7 @@ impl eframe::App for DarkstarApp {
         });
 
         // Right Panel: Entity Editor
-        egui::SidePanel::right("editor_panel").resizable(true).default_width(350.0).show(ctx, |ui| {
+        egui::SidePanel::right("editor_panel").resizable(true).default_width(400.0).show(ctx, |ui| {
             let i = self.i18n();
             ui.heading(i.editor_title);
             ui.separator();
@@ -657,6 +687,66 @@ impl eframe::App for DarkstarApp {
                 self.show_settings = false;
                 self.settings.save();
             }
+        }
+
+        // Confirmation Modal for Deletion
+        if let Some(uri) = self.confirm_delete_uri.clone() {
+            let mut open = true;
+            let i = self.i18n();
+            egui::Window::new(i.delete).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.label(i.confirm_delete_msg);
+                ui.label(egui::RichText::new(&uri).strong());
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(egui::RichText::new(i.confirm_delete_btn).color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(150, 50, 50))).clicked() {
+                        self.manager.delete_entity(&uri);
+                        self.selected_uri = None;
+                        self.confirm_delete_uri = None;
+                        self.graph_needs_sync = true;
+                        self.status_message = Some((if self.settings.language == Language::Korean { "엔티티가 삭제되었습니다" } else { "Entity deleted" }.to_string(), std::time::Instant::now()));
+                    }
+                    if ui.button(i.cancel).clicked() {
+                        self.confirm_delete_uri = None;
+                    }
+                });
+            });
+            if !open {
+                self.confirm_delete_uri = None;
+            }
+        }
+
+        // Confirmation Modal for Renaming
+        let mut rename_to_apply = None;
+        let mut closed_by_button = false;
+        let i = self.i18n();
+        if let Some((old_uri, buffer)) = &mut self.renaming_uri {
+            let mut open = true;
+            egui::Window::new(i.rename_entity).collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
+                ui.label(format!("Old URI: {}", old_uri));
+                ui.horizontal(|ui| {
+                    ui.label("New URI:");
+                    ui.text_edit_singleline(buffer);
+                });
+                ui.horizontal(|ui| {
+                    if ui.button(i.apply).clicked() {
+                        rename_to_apply = Some((old_uri.clone(), buffer.clone()));
+                    }
+                    if ui.button(i.cancel).clicked() {
+                        closed_by_button = true;
+                    }
+                });
+            });
+            if !open || closed_by_button {
+                self.renaming_uri = None;
+            }
+        }
+
+        if let Some((old, new)) = rename_to_apply {
+            self.manager.rename_entity(&old, &new);
+            self.selected_uri = Some(new);
+            self.renaming_uri = None;
+            self.graph_needs_sync = true;
+            self.status_message = Some((if self.settings.language == Language::Korean { "이름이 변경되었습니다" } else { "Entity renamed" }.to_string(), std::time::Instant::now()));
         }
 
         // Central Panel: DockArea
@@ -735,36 +825,52 @@ impl DarkstarApp {
             let mut forces: HashMap<String, Vec2> = HashMap::new();
             let keys: Vec<String> = self.nodes.keys().cloned().collect();
 
+            // Repulsion
             for i in 0..keys.len() {
                 for j in i+1..keys.len() {
                     let u = &keys[i];
                     let v = &keys[j];
                     let diff = self.nodes[u].pos - self.nodes[v].pos;
-                    let dist_sq = diff.length_sq().max(1.0);
-                    let force = diff.normalized() * (20000.0 / dist_sq);
+                    let dist_sq = diff.length_sq().max(10.0);
+                    let force = diff.normalized() * (25000.0 / dist_sq) * self.simulation_alpha.max(1.0);
                     *forces.entry(u.clone()).or_default() += force;
                     *forces.entry(v.clone()).or_default() -= force;
                 }
             }
 
+            // Springs
             for edge in &self.edges {
                 if let (Some(n1), Some(n2)) = (self.nodes.get(&edge.from), self.nodes.get(&edge.to)) {
                     let diff = n1.pos - n2.pos;
-                    let dist = diff.length();
-                    let force = diff.normalized() * (dist - 150.0) * -0.1;
+                    let dist = diff.length().max(1.0);
+                    let force = diff.normalized() * (dist - 150.0) * -0.15 * self.simulation_alpha.max(1.0).sqrt();
                     *forces.entry(edge.from.clone()).or_default() += force;
                     *forces.entry(edge.to.clone()).or_default() -= force;
                 }
             }
 
+            // Apply forces
             for (uri, node) in &mut self.nodes {
                 node.vel += *forces.get(uri).unwrap_or(&Vec2::ZERO);
-                node.vel *= 0.8; // Friction
+                node.vel *= 0.7; // Damping
                 if self.dragging_node.as_ref() != Some(uri) {
                     node.pos += node.vel * 0.1;
                 }
             }
-            ui.ctx().request_repaint();
+
+            // Decay alpha
+            if self.simulation_alpha > 1.0 {
+                self.simulation_alpha *= 0.95;
+                ui.ctx().request_repaint();
+            } else {
+                self.simulation_alpha = 1.0;
+            }
+            
+            // Continuous repaint if still moving significantly
+            let total_vel: f32 = self.nodes.values().map(|n| n.vel.length()).sum();
+            if total_vel > 0.1 {
+                ui.ctx().request_repaint();
+            }
         }
 
         // 4. Interaction (Node Drag/Select)
@@ -817,24 +923,62 @@ impl DarkstarApp {
         }
 
         // 5. Draw Edges
+        let mut edge_groups: HashMap<(String, String), Vec<&GraphEdge>> = HashMap::new();
         for edge in &self.edges {
-            if let (Some(n1), Some(n2)) = (self.nodes.get(&edge.from), self.nodes.get(&edge.to)) {
-                let p1 = to_screen_pos(n1.pos, self.graph_offset, self.graph_scale);
-                let p2 = to_screen_pos(n2.pos, self.graph_offset, self.graph_scale);
-                let color = if edge.is_inferred { egui::Color32::from_rgb(100, 180, 255) } else { egui::Color32::GRAY };
-                let stroke = egui::Stroke::new(1.5 * self.graph_scale.sqrt(), color);
-                
-                painter.line_segment([p1, p2], stroke);
-                
-                // Arrow
-                let dir = (p2 - p1).normalized();
-                let head = p2 - dir * (18.0 * self.graph_scale);
-                painter.line_segment([p2, head + dir.rot90() * 5.0 * self.graph_scale], stroke);
-                painter.line_segment([p2, head - dir.rot90() * 5.0 * self.graph_scale], stroke);
-                
-                if self.graph_scale > 0.4 {
-                    let mid = p1 + (p2 - p1) * 0.5;
-                    painter.text(mid, egui::Align2::CENTER_CENTER, &edge.label, egui::FontId::proportional(11.0 * self.graph_scale), color);
+            let key = if edge.from < edge.to { (edge.from.clone(), edge.to.clone()) } else { (edge.to.clone(), edge.from.clone()) };
+            edge_groups.entry(key).or_default().push(edge);
+        }
+
+        for group in edge_groups.values() {
+            for (i, edge) in group.iter().enumerate() {
+                if let (Some(n1), Some(n2)) = (self.nodes.get(&edge.from), self.nodes.get(&edge.to)) {
+                    let p1 = to_screen_pos(n1.pos, self.graph_offset, self.graph_scale);
+                    let p2 = to_screen_pos(n2.pos, self.graph_offset, self.graph_scale);
+                    
+                    let is_system = edge.label == "first" || edge.label == "rest" || edge.label == "type" || edge.label == "nil";
+                    let alpha = if is_system && !self.filters.show_system { 60 } else { 255 };
+                    
+                    let base_color = if edge.is_inferred { egui::Color32::from_rgb(100, 180, 255) } else { egui::Color32::GRAY };
+                    let color = base_color.linear_multiply(alpha as f32 / 255.0);
+                    
+                    let stroke_width = if is_system { 1.0 } else { 1.5 };
+                    let stroke = egui::Stroke::new(stroke_width * self.graph_scale.sqrt(), color);
+                    
+                    let dir = (p2 - p1).normalized();
+                    
+                    // Offset p2 to node boundary
+                    let is_bnode = edge.to.starts_with("_:");
+                    let target_radius = if is_bnode && !self.filters.show_system {
+                        4.0
+                    } else {
+                        match n2.node_type {
+                            NodeType::Class | NodeType::Individual => 20.0,
+                            NodeType::Property => 30.0,
+                            NodeType::Literal => 25.0,
+                        }
+                    } * self.graph_scale;
+                    
+                    let p2_boundary = p2 - dir * target_radius;
+                    painter.line_segment([p1, p2_boundary], stroke);
+                    
+                    // Arrow at boundary
+                    let head_size = if is_system { 6.0 } else { 10.0 } * self.graph_scale;
+                    let head = p2_boundary - dir * head_size;
+                    painter.line_segment([p2_boundary, head + dir.rot90() * (head_size * 0.6)], stroke);
+                    painter.line_segment([p2_boundary, head - dir.rot90() * (head_size * 0.6)], stroke);
+                    
+                    if self.graph_scale > 0.4 && alpha > 100 {
+                        let mid = p1 + (p2 - p1) * 0.5;
+                        let offset_dist = (i as f32 - (group.len() as f32 - 1.0) / 2.0) * 16.0 * self.graph_scale;
+                        let label_pos = mid + dir.rot90() * offset_dist;
+                        
+                        let font_id = egui::FontId::proportional(10.0 * self.graph_scale);
+                        let galley = ui.painter().layout_no_wrap(edge.label.clone(), font_id, color);
+                        let rect = galley.rect.expand(2.0).translate(label_pos - galley.rect.center());
+                        
+                        painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(alpha.min(160)));
+                        painter.galley(rect.min, galley, color);
+                    }
                 }
             }
         }
@@ -843,32 +987,42 @@ impl DarkstarApp {
         for (uri, node) in &self.nodes {
             let pos = to_screen_pos(node.pos, self.graph_offset, self.graph_scale);
             let is_selected = self.selected_uri.as_deref() == Some(uri);
-            let stroke = if is_selected { egui::Stroke::new(3.0 * self.graph_scale, egui::Color32::WHITE) } else { egui::Stroke::new(1.0 * self.graph_scale, egui::Color32::BLACK) };
-            let radius = 20.0 * self.graph_scale;
+            let is_bnode = uri.starts_with("_:");
+            let is_internal = is_bnode && !self.filters.show_system;
+            
+            let stroke_width = if is_selected { 3.0 } else { 1.0 };
+            let stroke_color = if is_selected { egui::Color32::WHITE } else if is_internal { egui::Color32::from_gray(80) } else { egui::Color32::BLACK };
+            let stroke = egui::Stroke::new(stroke_width * self.graph_scale, stroke_color);
+            
+            let radius = if is_internal { 4.0 } else { 20.0 } * self.graph_scale;
+            let alpha = if is_internal { 100 } else { 255 };
 
             match node.node_type {
                 NodeType::Class => {
-                    painter.circle(pos, radius, egui::Color32::from_rgb(249, 232, 88), stroke);
+                    let color = egui::Color32::from_rgb(249, 232, 88).linear_multiply(alpha as f32 / 255.0);
+                    painter.circle(pos, radius, color, stroke);
                 }
                 NodeType::Property => {
-                    let rect_node = egui::Rect::from_center_size(pos, Vec2::new(60.0 * self.graph_scale, 30.0 * self.graph_scale));
-                    painter.rect(rect_node, 5.0 * self.graph_scale, egui::Color32::from_rgb(170, 204, 255), stroke);
+                    let color = egui::Color32::from_rgb(170, 204, 255).linear_multiply(alpha as f32 / 255.0);
+                    let rect_node = egui::Rect::from_center_size(pos, Vec2::new(radius * 3.0, radius * 1.5));
+                    painter.rect(rect_node, 5.0 * self.graph_scale, color, stroke);
                 }
                 NodeType::Individual => {
-                    let size = 18.0 * self.graph_scale;
-                    let p1 = pos + Vec2::new(0.0, -size);
-                    let p2 = pos + Vec2::new(size, 0.0);
-                    let p3 = pos + Vec2::new(0.0, size);
-                    let p4 = pos + Vec2::new(-size, 0.0);
-                    painter.add(egui::Shape::convex_polygon(vec![p1, p2, p3, p4], egui::Color32::from_rgb(194, 174, 255), stroke));
+                    let color = egui::Color32::from_rgb(194, 174, 255).linear_multiply(alpha as f32 / 255.0);
+                    let p1 = pos + Vec2::new(0.0, -radius);
+                    let p2 = pos + Vec2::new(radius, 0.0);
+                    let p3 = pos + Vec2::new(0.0, radius);
+                    let p4 = pos + Vec2::new(-radius, 0.0);
+                    painter.add(egui::Shape::convex_polygon(vec![p1, p2, p3, p4], color, stroke));
                 }
                 NodeType::Literal => {
-                    let rect_node = egui::Rect::from_center_size(pos, Vec2::new(50.0 * self.graph_scale, 25.0 * self.graph_scale));
-                    painter.rect(rect_node, 0.0, egui::Color32::WHITE, stroke);
+                    let color = egui::Color32::WHITE.linear_multiply(alpha as f32 / 255.0);
+                    let rect_node = egui::Rect::from_center_size(pos, Vec2::new(radius * 2.5, radius * 1.2));
+                    painter.rect(rect_node, 0.0, color, stroke);
                 }
             }
 
-            if self.graph_scale > 0.3 {
+            if self.graph_scale > 0.5 && !is_internal {
                 painter.text(pos + Vec2::new(0.0, radius + 8.0 * self.graph_scale), egui::Align2::CENTER_TOP, &node.label, egui::FontId::proportional(12.0 * self.graph_scale), egui::Color32::WHITE);
             }
         }
@@ -1050,13 +1204,40 @@ impl DarkstarApp {
         let i = self.i18n();
         ui.horizontal(|ui| {
             ui.heading(i.class_hierarchy);
-            ui.add_space(ui.available_width() - 250.0);
-            if ui.button(i.add_subclass).clicked() {
-                // Placeholder for logic
-            }
-            if ui.button(i.add_sibling).clicked() {
-                // Placeholder for logic
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(i.add_sibling).clicked() {
+                    let new_uri = format!("http://example.org/NewClass_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    self.manager.add_assertion(new_uri.clone(), "http://www.w3.org/1999/02/22-rdf-syntax-ns#type".to_string(), "http://www.w3.org/2002/07/owl#Class".to_string());
+                    
+                    if let Some(sibling) = self.selected_uri.clone() {
+                        use sophia::api::term::matcher::Any;
+                        let sub_class_of = InferenceEngine::make_term("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+                        let sibling_term = InferenceEngine::make_term(&sibling);
+                        let mut parents = Vec::new();
+                        for t in self.manager.memory.main_graph.triples_matching(Some(&sibling_term), Some(&sub_class_of), Any) {
+                            if let Ok(t) = t {
+                                parents.push(crate::rules::extract_str(&t.o()));
+                            }
+                        }
+                        for parent in parents {
+                            self.manager.add_assertion(new_uri.clone(), "http://www.w3.org/2000/01/rdf-schema#subClassOf".to_string(), parent);
+                        }
+                    }
+                    self.selected_uri = Some(new_uri.clone());
+                    self.renaming_uri = Some((new_uri.clone(), new_uri));
+                    self.graph_needs_sync = true;
+                }
+                if ui.button(i.add_subclass).clicked() {
+                    let new_uri = format!("http://example.org/NewClass_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    self.manager.add_assertion(new_uri.clone(), "http://www.w3.org/1999/02/22-rdf-syntax-ns#type".to_string(), "http://www.w3.org/2002/07/owl#Class".to_string());
+                    if let Some(parent) = self.selected_uri.clone() {
+                        self.manager.add_assertion(new_uri.clone(), "http://www.w3.org/2000/01/rdf-schema#subClassOf".to_string(), parent);
+                    }
+                    self.selected_uri = Some(new_uri.clone());
+                    self.renaming_uri = Some((new_uri.clone(), new_uri));
+                    self.graph_needs_sync = true;
+                }
+            });
         });
         ui.separator();
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1068,23 +1249,42 @@ impl DarkstarApp {
         let i = self.i18n();
         ui.horizontal(|ui| {
             ui.heading(if is_object_property { i.obj_props } else { i.data_props });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(if is_object_property { i.add_sibling_property } else { i.add_sibling_property }).clicked() {
+                     let new_uri = format!("http://example.org/NewProperty_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                     self.manager.add_assertion(new_uri.clone(), "http://www.w3.org/1999/02/22-rdf-syntax-ns#type".to_string(), (if is_object_property { "http://www.w3.org/2002/07/owl#ObjectProperty" } else { "http://www.w3.org/2002/07/owl#DatatypeProperty" }).to_string());
+                     
+                     if let Some(sibling) = self.selected_uri.clone() {
+                         use sophia::api::term::matcher::Any;
+                         let sub_prop_of = InferenceEngine::make_term("http://www.w3.org/2000/01/rdf-schema#subPropertyOf");
+                         let sibling_term = InferenceEngine::make_term(&sibling);
+                         let mut parents = Vec::new();
+                         for t in self.manager.memory.main_graph.triples_matching(Some(&sibling_term), Some(&sub_prop_of), Any) {
+                             if let Ok(t) = t {
+                                 parents.push(crate::rules::extract_str(&t.o()));
+                             }
+                         }
+                         for parent in parents {
+                             self.manager.add_assertion(new_uri.clone(), "http://www.w3.org/2000/01/rdf-schema#subPropertyOf".to_string(), parent);
+                         }
+                     }
+                     self.selected_uri = Some(new_uri.clone());
+                     self.renaming_uri = Some((new_uri.clone(), new_uri));
+                     self.graph_needs_sync = true;
+                }
+                if ui.button(if is_object_property { i.add_subproperty } else { i.add_subproperty }).clicked() {
+                    let new_uri = format!("http://example.org/NewProperty_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+                    self.manager.add_assertion(new_uri.clone(), "http://www.w3.org/1999/02/22-rdf-syntax-ns#type".to_string(), (if is_object_property { "http://www.w3.org/2002/07/owl#ObjectProperty" } else { "http://www.w3.org/2002/07/owl#DatatypeProperty" }).to_string());
+                    if let Some(parent) = self.selected_uri.clone() {
+                        self.manager.add_assertion(new_uri.clone(), "http://www.w3.org/2000/01/rdf-schema#subPropertyOf".to_string(), parent);
+                    }
+                    self.selected_uri = Some(new_uri.clone());
+                    self.renaming_uri = Some((new_uri.clone(), new_uri));
+                    self.graph_needs_sync = true;
+                }
+            });
         });
         ui.separator();
-        
-        // Characteristics (only for object properties)
-        if is_object_property {
-            if self.selected_uri.is_some() {
-                ui.group(|ui| {
-                    ui.label(i.characteristics);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.checkbox(&mut false, if self.settings.language == Language::Korean { "전이적(Transitive)" } else { "Transitive" });
-                        ui.checkbox(&mut false, if self.settings.language == Language::Korean { "대칭적(Symmetric)" } else { "Symmetric" });
-                        ui.checkbox(&mut false, if self.settings.language == Language::Korean { "비대칭적(Asymmetric)" } else { "Asymmetric" });
-                        ui.checkbox(&mut false, if self.settings.language == Language::Korean { "반사적(Reflexive)" } else { "Reflexive" });
-                    });
-                });
-            }
-        }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             self.render_property_hierarchy(ui, is_object_property);
@@ -1095,42 +1295,40 @@ impl DarkstarApp {
         let i = self.i18n();
         ui.horizontal(|ui| {
             ui.heading(i.individuals);
-            ui.add_space(ui.available_width() - 400.0);
-            if ui.add_enabled(!self.selected_individuals.is_empty(), egui::Button::new(i.delete_selected)).clicked() {
-                // Bulk delete logic
-                let mut changes = Vec::new();
-                for uri in &self.selected_individuals {
-                    // This is complex as an individual has many triples. 
-                    // For now, let's just clear their types.
-                    // A better way is to find all triples where they are Subject.
-                    let subject_term = InferenceEngine::make_term(uri);
-                    let triples: Vec<_> = self.manager.memory.asserted_graph.triples_matching(Some(&subject_term), sophia::api::term::matcher::Any, sophia::api::term::matcher::Any).flatten().collect();
-                    for t in triples {
-                        changes.push(crate::core::history::DarkstarEvent::AxiomRemoved {
-                            s: crate::rules::extract_str(&t.s()),
-                            p: crate::rules::extract_str(&t.p()),
-                            o: crate::rules::extract_str(&t.o()),
-                        });
-                    }
-                }
-                if !changes.is_empty() {
-                    self.manager.history.push_change(crate::core::history::DarkstarEvent::Batch(changes.clone()));
-                    for event in changes {
-                        match event {
-                            crate::core::history::DarkstarEvent::AxiomRemoved { s, p, o } => {
-                                let s_term = InferenceEngine::make_term(&s);
-                                let p_term = InferenceEngine::make_term(&p);
-                                let o_term = InferenceEngine::make_term(&o);
-                                self.manager.memory.asserted_graph.remove(&s_term, &p_term, &o_term).unwrap();
-                                self.manager.memory.main_graph.remove(&s_term, &p_term, &o_term).unwrap();
-                            }
-                            _ => {}
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(!self.selected_individuals.is_empty(), egui::Button::new(i.delete_selected)).clicked() {
+                    // Bulk delete logic
+                    let mut changes = Vec::new();
+                    for uri in &self.selected_individuals {
+                        let subject_term = InferenceEngine::make_term(uri);
+                        let triples: Vec<_> = self.manager.memory.asserted_graph.triples_matching(Some(&subject_term), sophia::api::term::matcher::Any, sophia::api::term::matcher::Any).flatten().collect();
+                        for t in triples {
+                            changes.push(crate::core::history::DarkstarEvent::AxiomRemoved {
+                                s: crate::rules::extract_str(&t.s()),
+                                p: crate::rules::extract_str(&t.p()),
+                                o: crate::rules::extract_str(&t.o()),
+                            });
                         }
                     }
-                    self.manager.is_dirty = true;
-                    self.selected_individuals.clear();
+                    if !changes.is_empty() {
+                        self.manager.history.push_change(crate::core::history::DarkstarEvent::Batch(changes.clone()));
+                        for event in changes {
+                            match event {
+                                crate::core::history::DarkstarEvent::AxiomRemoved { s, p, o } => {
+                                    let s_term = InferenceEngine::make_term(&s);
+                                    let p_term = InferenceEngine::make_term(&p);
+                                    let o_term = InferenceEngine::make_term(&o);
+                                    self.manager.memory.asserted_graph.remove(&s_term, &p_term, &o_term).unwrap();
+                                    self.manager.memory.main_graph.remove(&s_term, &p_term, &o_term).unwrap();
+                                }
+                                _ => {}
+                            }
+                        }
+                        self.manager.is_dirty = true;
+                        self.selected_individuals.clear();
+                    }
                 }
-            }
+            });
         });
         ui.separator();
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1149,36 +1347,29 @@ impl DarkstarApp {
         ui.label(egui::RichText::new(&uri).small().weak());
         ui.separator();
 
-        // Modal for renaming
-        if let Some((old_uri, mut buffer)) = self.renaming_uri.take() {
-            egui::Window::new(i.rename_entity).collapsible(false).resizable(false).show(ui.ctx(), |ui| {
-                ui.label(format!("Old URI: {}", old_uri));
-                ui.horizontal(|ui| {
-                    ui.label("New URI:");
-                    ui.text_edit_singleline(&mut buffer);
-                });
-                ui.horizontal(|ui| {
-                    if ui.button(i.apply).clicked() {
-                        self.manager.rename_entity(&old_uri, &buffer);
-                        self.selected_uri = Some(buffer.clone());
-                        self.graph_needs_sync = true;
-                        self.status_message = Some((if self.settings.language == Language::Korean { "이름이 변경되었습니다" } else { "Entity renamed" }.to_string(), std::time::Instant::now()));
-                        self.renaming_uri = None;
-                    }
-                    if ui.button(i.cancel).clicked() {
-                        self.renaming_uri = None;
-                    }
-                });
-                self.renaming_uri = self.renaming_uri.as_ref().map(|_| (old_uri, buffer));
-            });
-        }
-
         egui::ScrollArea::vertical().show(ui, |ui| {
             let i = self.i18n();
             // General Description / Annotations
             ui.collapsing(i.annotations, |ui| {
                 ui.label("rdfs:comment");
-                ui.text_edit_multiline(&mut String::new());
+                
+                // Initialize buffer if needed
+                if self.annotation_buffer.is_none() || self.annotation_buffer.as_ref().unwrap().0 != uri {
+                    let comment = self.manager.get_comment(&uri);
+                    self.annotation_buffer = Some((uri.clone(), comment));
+                }
+
+                if let Some((_, buffer)) = &mut self.annotation_buffer {
+                    let response = ui.add(egui::TextEdit::multiline(buffer).desired_width(f32::INFINITY));
+                    if response.changed() {
+                        // We could save on every keystroke but that's what caused the focus loss.
+                        // Instead, let's just keep the buffer and save on lost_focus or manually.
+                    }
+                    if response.lost_focus() {
+                        self.manager.set_comment(&uri, buffer);
+                        self.graph_needs_sync = true;
+                    }
+                }
             });
 
             // Property Assertions
@@ -1189,13 +1380,57 @@ impl DarkstarApp {
             // Class-specific (SubClassOf / EquivalentClass)
             ui.collapsing(i.class_relations, |ui| {
                 ui.label(i.subclass_of);
-                // List existing superclasses with remove buttons
-                if ui.button(i.add_superclass).clicked() {}
+                let subject_term = InferenceEngine::make_term(&uri);
+                let subclass_p = InferenceEngine::make_term("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+                
+                let mut to_remove = None;
+                for t in self.manager.memory.asserted_graph.triples_matching(Some(&subject_term), Some(&subclass_p), sophia::api::term::matcher::Any).flatten() {
+                    let o_str = crate::rules::extract_str(&t.o());
+                    ui.horizontal(|ui| {
+                        ui.label(Self::get_label(&o_str));
+                        if ui.button("🗑").clicked() {
+                            to_remove = Some(o_str);
+                        }
+                    });
+                }
+                
+                if let Some(o) = to_remove {
+                    self.manager.remove_assertion(uri.clone(), "http://www.w3.org/2000/01/rdf-schema#subClassOf".to_string(), o);
+                    self.graph_needs_sync = true;
+                }
+
+                if ui.button(i.add_superclass).clicked() {
+                    let placeholder = "http://www.w3.org/2002/07/owl#Thing";
+                    self.manager.add_assertion(uri.clone(), "http://www.w3.org/2000/01/rdf-schema#subClassOf".to_string(), placeholder.to_string());
+                    self.graph_needs_sync = true;
+                }
             });
+
+            // Property Characteristics (for Object Properties)
+            if self.is_object_property(&uri) {
+                ui.collapsing(i.characteristics, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let chars = [
+                            ("http://www.w3.org/2002/07/owl#TransitiveProperty", if self.settings.language == Language::Korean { "전이적(Transitive)" } else { "Transitive" }),
+                            ("http://www.w3.org/2002/07/owl#SymmetricProperty", if self.settings.language == Language::Korean { "대칭적(Symmetric)" } else { "Symmetric" }),
+                            ("http://www.w3.org/2002/07/owl#AsymmetricProperty", if self.settings.language == Language::Korean { "비대칭적(Asymmetric)" } else { "Asymmetric" }),
+                            ("http://www.w3.org/2002/07/owl#ReflexiveProperty", if self.settings.language == Language::Korean { "반사적(Reflexive)" } else { "Reflexive" }),
+                            ("http://www.w3.org/2002/07/owl#FunctionalProperty", if self.settings.language == Language::Korean { "기능적(Functional)" } else { "Functional" }),
+                            ("http://www.w3.org/2002/07/owl#InverseFunctionalProperty", if self.settings.language == Language::Korean { "역기능적(Inverse Functional)" } else { "Inverse Functional" }),
+                        ];
+                        for (char_uri, label) in chars {
+                            let mut val = self.manager.has_characteristic(&uri, char_uri);
+                            if ui.checkbox(&mut val, label).changed() {
+                                self.manager.toggle_characteristic(&uri, char_uri);
+                            }
+                        }
+                    });
+                });
+            }
 
             ui.separator();
             if ui.add(egui::Button::new(i.delete_entity).fill(egui::Color32::from_rgb(150, 50, 50))).clicked() {
-                // Delete logic
+                self.confirm_delete_uri = Some(uri);
             }
         });
     }
@@ -1206,7 +1441,7 @@ impl DarkstarApp {
         let i = self.i18n();
 
         ui.label(egui::RichText::new(i.existing_assertions).strong());
-        egui::Grid::new("assertion_editor_grid").striped(true).num_columns(3).show(ui, |ui| {
+        egui::Grid::new(format!("assertion_grid_{}", uri)).striped(true).num_columns(3).show(ui, |ui| {
             let triples = self.manager.memory.asserted_graph.triples_matching(Some(&subject_term), sophia::api::term::matcher::Any, sophia::api::term::matcher::Any);
             for t in triples.flatten() {
                 let p_str = crate::rules::extract_str(&t.p());
@@ -1230,25 +1465,27 @@ impl DarkstarApp {
         ui.group(|ui| {
             let i = self.i18n();
             ui.label(egui::RichText::new(i.add_property).strong());
-            ui.horizontal(|ui| {
+            egui::Grid::new(format!("add_prop_grid_{}", uri)).num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
                 ui.label(format!("{}:", i.predicate));
-                ui.text_edit_singleline(&mut self.new_prop_predicate).on_hover_text("e.g., i:http://example.org/hasName");
+                ui.add(egui::TextEdit::singleline(&mut self.new_prop_predicate).desired_width(f32::INFINITY).hint_text("e.g. i:hasName"));
+                ui.end_row();
+                
                 ui.label(format!("{}:", i.value));
-                ui.text_edit_singleline(&mut self.new_prop_value).on_hover_text("Value (use i: for IRI, l: for Literal)");
+                ui.add(egui::TextEdit::singleline(&mut self.new_prop_value).desired_width(f32::INFINITY).hint_text("e.g. l:John or i:Person"));
+                ui.end_row();
             });
-            ui.horizontal(|ui| {
-                if ui.button(format!("✚ {}", i.add)).clicked() {
-                    if !self.new_prop_predicate.is_empty() && !self.new_prop_value.is_empty() {
-                        self.manager.add_assertion(
-                            uri.to_string(),
-                            self.new_prop_predicate.clone(),
-                            self.new_prop_value.clone(),
-                        );
-                        self.status_message = Some((if self.settings.language == Language::Korean { "어설션이 추가되었습니다" } else { "Assertion added" }.to_string(), std::time::Instant::now()));
-                        self.new_prop_value.clear(); // Clear value after add
-                    }
+            ui.add_space(5.0);
+            if ui.button(format!("✚ {}", i.add)).clicked() {
+                if !self.new_prop_predicate.is_empty() && !self.new_prop_value.is_empty() {
+                    self.manager.add_assertion(
+                        uri.to_string(),
+                        self.new_prop_predicate.clone(),
+                        self.new_prop_value.clone(),
+                    );
+                    self.status_message = Some((if self.settings.language == Language::Korean { "어설션이 추가되었습니다" } else { "Assertion added" }.to_string(), std::time::Instant::now()));
+                    self.new_prop_value.clear();
                 }
-            });
+            }
         });
     }
 }
@@ -1336,6 +1573,7 @@ impl<'a> TabViewer for DarkstarTabViewer<'a> {
                                 if ui.checkbox(&mut self.app.filters.show_schema, i.show_schema).changed() { self.app.graph_needs_sync = true; }
                                 if ui.checkbox(&mut self.app.filters.show_inferred, i.show_inferred).changed() { self.app.graph_needs_sync = true; }
                                 if ui.checkbox(&mut self.app.filters.show_literals, i.show_literals).changed() { self.app.graph_needs_sync = true; }
+                                if ui.checkbox(&mut self.app.filters.show_system, i.show_system).changed() { self.app.graph_needs_sync = true; }
                             });
                         });
                     });
@@ -1358,10 +1596,23 @@ impl<'a> TabViewer for DarkstarTabViewer<'a> {
     }
 }
 
+fn load_icon() -> Option<egui::IconData> {
+    let icon_bytes = include_bytes!("../assets/icon.png");
+    let image = image::load_from_memory(icon_bytes).ok()?;
+    let image = image.to_rgba8();
+    let (width, height) = image.dimensions();
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 700.0]),
+            .with_inner_size([1000.0, 700.0])
+            .with_icon(load_icon().unwrap_or_default()),
         ..Default::default()
     };
     eframe::run_native(

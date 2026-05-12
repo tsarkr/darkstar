@@ -75,6 +75,11 @@ pub struct L10n {
     pub consistent: &'static str,
     pub inconsistent: &'static str,
     pub appearance: &'static str,
+    pub confirm_delete_msg: &'static str,
+    pub confirm_delete_btn: &'static str,
+    pub add_subproperty: &'static str,
+    pub add_sibling_property: &'static str,
+    pub show_system: &'static str,
 }
 
 impl L10n {
@@ -155,6 +160,11 @@ impl L10n {
                 consistent: "Consistent",
                 inconsistent: "Inconsistent",
                 appearance: "Appearance",
+                confirm_delete_msg: "Are you sure you want to delete this entity? All associated triples will be removed.",
+                confirm_delete_btn: "Yes, Delete",
+                add_subproperty: "✚ Add Subproperty",
+                add_sibling_property: "✚ Add Sibling Property",
+                show_system: "Show System Relations",
             },
             Language::Korean => Self {
                 file: "파일",
@@ -231,6 +241,11 @@ impl L10n {
                 consistent: "정상",
                 inconsistent: "논리적 모순",
                 appearance: "기본 설정",
+                confirm_delete_msg: "이 엔티티를 삭제하시겠습니까? 관련된 모든 데이터가 제거됩니다.",
+                confirm_delete_btn: "네, 삭제합니다",
+                add_subproperty: "✚ 하위 속성 추가",
+                add_sibling_property: "✚ 형제 속성 추가",
+                show_system: "시스템 관계 표시",
             },
         }
     }

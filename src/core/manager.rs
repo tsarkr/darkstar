@@ -129,7 +129,10 @@ impl DarkstarManager {
     }
 
     pub fn rename_entity(&mut self, old_uri: &str, new_uri: &str) {
-        if old_uri == new_uri { return; }
+        let old_prefixed = self.ensure_iri_prefix(old_uri);
+        let new_prefixed = self.ensure_iri_prefix(new_uri);
+        
+        if old_prefixed == new_prefixed { return; }
         
         let mut changes = Vec::new();
         let mut triples_to_process = Vec::new();
@@ -141,7 +144,7 @@ impl DarkstarManager {
             let p_str = crate::rules::extract_str(&t.p());
             let o_str = crate::rules::extract_str(&t.o());
 
-            if s_str == old_uri || p_str == old_uri || o_str == old_uri {
+            if s_str == old_prefixed || p_str == old_prefixed || o_str == old_prefixed {
                 triples_to_process.push((s_str, p_str, o_str));
             }
         }
@@ -151,9 +154,9 @@ impl DarkstarManager {
             changes.push(DarkstarEvent::AxiomRemoved { s: s.clone(), p: p.clone(), o: o.clone() });
             
             // Add new
-            let new_s = if s == old_uri { new_uri.to_string() } else { s };
-            let new_p = if p == old_uri { new_uri.to_string() } else { p };
-            let new_o = if o == old_uri { new_uri.to_string() } else { o };
+            let new_s = if s == old_prefixed { new_prefixed.clone() } else { s };
+            let new_p = if p == old_prefixed { new_prefixed.clone() } else { p };
+            let new_o = if o == old_prefixed { new_prefixed.clone() } else { o };
             changes.push(DarkstarEvent::AxiomAdded { s: new_s, p: new_p, o: new_o });
         }
 
@@ -161,6 +164,88 @@ impl DarkstarManager {
             let batch = DarkstarEvent::Batch(changes);
             self.apply_event(batch.clone());
             self.history.push_change(batch);
+        }
+    }
+
+    pub fn delete_entity(&mut self, uri: &str) {
+        let prefixed = self.ensure_iri_prefix(uri);
+        let mut changes = Vec::new();
+        let mut triples_to_process = Vec::new();
+
+        for t in self.memory.asserted_graph.triples() {
+            let t = t.unwrap();
+            let s_str = crate::rules::extract_str(&t.s());
+            let p_str = crate::rules::extract_str(&t.p());
+            let o_str = crate::rules::extract_str(&t.o());
+
+            if s_str == prefixed || p_str == prefixed || o_str == prefixed {
+                triples_to_process.push((s_str, p_str, o_str));
+            }
+        }
+
+        for (s, p, o) in triples_to_process {
+            changes.push(DarkstarEvent::AxiomRemoved { s, p, o });
+        }
+
+        if !changes.is_empty() {
+            let batch = DarkstarEvent::Batch(changes);
+            self.apply_event(batch.clone());
+            self.history.push_change(batch);
+        }
+    }
+
+    pub fn get_comment(&self, uri: &str) -> String {
+        let prefixed = self.ensure_iri_prefix(uri);
+        let rdfs_comment = "http://www.w3.org/2000/01/rdf-schema#comment";
+        let s_term = InferenceEngine::make_term(&prefixed);
+        let p_term = InferenceEngine::make_term(rdfs_comment);
+        
+        for t in self.memory.main_graph.triples_matching(Some(&s_term), Some(&p_term), sophia::api::term::matcher::Any).flatten() {
+            return crate::rules::extract_str(&t.o());
+        }
+        String::new()
+    }
+
+    pub fn set_comment(&mut self, uri: &str, comment: &str) {
+        let prefixed = self.ensure_iri_prefix(uri);
+        let rdfs_comment = "http://www.w3.org/2000/01/rdf-schema#comment";
+        
+        // Remove existing
+        let current = self.get_comment(uri);
+        if !current.is_empty() {
+            self.remove_assertion(prefixed.clone(), rdfs_comment.to_string(), format!("l:{}", current));
+        }
+        
+        // Add new
+        if !comment.is_empty() {
+            self.add_assertion(prefixed, rdfs_comment.to_string(), format!("l:{}", comment));
+        }
+    }
+
+    pub fn has_characteristic(&self, uri: &str, char_uri: &str) -> bool {
+        let prefixed = self.ensure_iri_prefix(uri);
+        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let s_term = InferenceEngine::make_term(&prefixed);
+        let p_term = InferenceEngine::make_term(rdf_type);
+        let o_term = InferenceEngine::make_term(char_uri);
+        
+        self.memory.main_graph.contains(&s_term, &p_term, &o_term).unwrap_or(false)
+    }
+
+    pub fn toggle_characteristic(&mut self, uri: &str, char_uri: &str) {
+        let prefixed = self.ensure_iri_prefix(uri);
+        if self.has_characteristic(uri, char_uri) {
+            self.remove_assertion(prefixed, "http://www.w3.org/1999/02/22-rdf-syntax-ns#type".to_string(), format!("i:{}", char_uri));
+        } else {
+            self.add_assertion(prefixed, "http://www.w3.org/1999/02/22-rdf-syntax-ns#type".to_string(), format!("i:{}", char_uri));
+        }
+    }
+
+    fn ensure_iri_prefix(&self, uri: &str) -> String {
+        if uri.starts_with("i:") || uri.starts_with("l:") || uri.starts_with("b:") {
+            uri.to_string()
+        } else {
+            format!("i:{}", uri)
         }
     }
 
