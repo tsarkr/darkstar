@@ -2,7 +2,7 @@ use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 use directories::ProjectDirs;
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Language {
     English,
     Korean,

@@ -39,4 +39,13 @@ impl EngineMemory {
             inconsistencies: Vec::new(),
         }
     }
+
+    pub fn clear(&mut self) {
+        self.main_graph = FastGraph::new();
+        self.delta_graph = FastGraph::new();
+        self.asserted_graph = FastGraph::new();
+        self.inferred_graph = FastGraph::new();
+        self.is_consistent = true;
+        self.inconsistencies.clear();
+    }
 }
