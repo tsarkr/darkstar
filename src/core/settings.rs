@@ -15,6 +15,7 @@ pub struct AppSettings {
     pub recent_files: Vec<PathBuf>,
     pub enabled_rules: ReasonerRules,
     pub language: Language,
+    pub is_first_run: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -34,7 +35,8 @@ impl Default for AppSettings {
             ui_scale: 1.0,
             recent_files: Vec::new(),
             enabled_rules: ReasonerRules::default(),
-            language: Language::Korean,
+            language: Language::English,
+            is_first_run: true,
         }
     }
 }
@@ -58,7 +60,8 @@ impl AppSettings {
             let config_dir = proj_dirs.config_dir();
             let config_file = config_dir.join("settings.json");
             if let Ok(data) = std::fs::read_to_string(config_file) {
-                if let Ok(settings) = serde_json::from_str(&data) {
+                if let Ok(mut settings) = serde_json::from_str::<AppSettings>(&data) {
+                    settings.is_first_run = false;
                     return settings;
                 }
             }

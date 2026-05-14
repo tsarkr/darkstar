@@ -3,6 +3,7 @@ mod rules;
 pub mod core;
 
 use eframe::egui;
+use egui_extras::install_image_loaders;
 use crate::core::manager::DarkstarManager;
 use crate::core::settings::{AppSettings, Language};
 use crate::core::l10n::L10n;
@@ -28,6 +29,14 @@ enum NodeType {
     Property,
     Individual,
     Literal,
+    Blank,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum AppState {
+    Splash,
+    Onboarding,
+    Main,
 }
 
 struct GraphNode {
@@ -49,6 +58,9 @@ enum LayoutMode {
     ForceDirected,
     Hierarchical,
     Radial,
+    Grid,
+    Circular,
+    Concentric,
 }
 
 struct GraphFilters {
@@ -86,6 +98,7 @@ struct DarkstarApp {
     auto_reasoning: bool,
     status_message: Option<(String, std::time::Instant)>,
     show_settings: bool,
+    show_metrics_dialog: bool,
 
     // Persistence
     settings: AppSettings,
@@ -113,8 +126,15 @@ struct DarkstarApp {
     clipboard: Vec<String>,
     selected_individuals: HashSet<String>,
     confirm_delete_uri: Option<String>,
+    confirm_revert_dialog: bool,
+    merging_uri: Option<(String, String)>, // (Target buffer, source_uri)
     annotation_buffer: Option<(String, String)>, // (uri, buffer)
     simulation_alpha: f32,
+    
+    // New Onboarding/Splash state
+    state: AppState,
+    splash_start_time: std::time::Instant,
+    onboarding_step: usize,
 }
 
 impl DarkstarApp {
@@ -123,6 +143,7 @@ impl DarkstarApp {
     }
 
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        install_image_loaders(&cc.egui_ctx);
         let settings = AppSettings::load();
         
         // --- Korean Font Support (Fix for Tofu boxes) ---
@@ -187,6 +208,7 @@ impl DarkstarApp {
             auto_reasoning: true,
             status_message: None,
             show_settings: false,
+            show_metrics_dialog: false,
             new_prop_predicate: String::new(),
             new_prop_value: String::new(),
             nodes: HashMap::new(),
@@ -202,8 +224,13 @@ impl DarkstarApp {
             clipboard: Vec::new(),
             selected_individuals: HashSet::new(),
             confirm_delete_uri: None,
+            confirm_revert_dialog: false,
+            merging_uri: None,
             annotation_buffer: None,
             simulation_alpha: 1.0,
+            state: AppState::Splash,
+            splash_start_time: std::time::Instant::now(),
+            onboarding_step: 0,
         }
     }
 
@@ -230,18 +257,22 @@ impl DarkstarApp {
         let mut seen_nodes = HashSet::new();
         let mut node_types = HashMap::new();
 
-        let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        let owl_class = "http://www.w3.org/2002/07/owl#Class";
-        let rdfs_class = "http://www.w3.org/2000/01/rdf-schema#Class";
-        let owl_obj_prop = "http://www.w3.org/2002/07/owl#ObjectProperty";
-        let owl_data_prop = "http://www.w3.org/2002/07/owl#DatatypeProperty";
-        let owl_individual = "http://www.w3.org/2002/07/owl#NamedIndividual";
+        let rdf_type = "i:http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        let owl_class = "i:http://www.w3.org/2002/07/owl#Class";
+        let rdfs_class = "i:http://www.w3.org/2000/01/rdf-schema#Class";
+        let owl_obj_prop = "i:http://www.w3.org/2002/07/owl#ObjectProperty";
+        let owl_data_prop = "i:http://www.w3.org/2002/07/owl#DatatypeProperty";
+        let owl_individual = "i:http://www.w3.org/2002/07/owl#NamedIndividual";
 
         // 1. Pre-identify node types
         for t in self.manager.memory.main_graph.triples().flatten() {
             let s = crate::rules::extract_str(&t.s());
             let p = crate::rules::extract_str(&t.p());
             let o = crate::rules::extract_str(&t.o());
+
+            // Identify Blank Nodes
+            if s.starts_with("_:") { node_types.entry(s.clone()).or_insert(NodeType::Blank); }
+            if o.starts_with("_:") { node_types.entry(o.clone()).or_insert(NodeType::Blank); }
 
             if p == rdf_type {
                 if o == owl_class || o == rdfs_class {
@@ -336,7 +367,11 @@ impl DarkstarApp {
                     pos: Vec2::new(400.0 + angle.cos() * radius, 300.0 + angle.sin() * radius),
                     vel: Vec2::ZERO,
                     label: Self::get_label(uri),
-                    node_type: *node_types.get(uri).unwrap_or(if uri.starts_with("l:") { &NodeType::Literal } else { &NodeType::Individual }),
+                    node_type: *node_types.get(uri).unwrap_or({
+                        if uri.starts_with("l:") { &NodeType::Literal }
+                        else if uri.starts_with("_:") { &NodeType::Blank }
+                        else { &NodeType::Individual }
+                    }),
                 });
                 new_node_count += 1;
             }
@@ -352,6 +387,9 @@ impl DarkstarApp {
         match self.filters.layout_mode {
             LayoutMode::Hierarchical => self.apply_hierarchical_layout(),
             LayoutMode::Radial => self.apply_radial_layout(),
+            LayoutMode::Grid => self.apply_grid_layout(),
+            LayoutMode::Circular => self.apply_circular_layout(),
+            LayoutMode::Concentric => self.apply_concentric_layout(),
             LayoutMode::ForceDirected => {},
         }
         self.graph_needs_sync = false;
@@ -427,10 +465,89 @@ impl DarkstarApp {
             }
         }
     }
+
+    fn apply_grid_layout(&mut self) {
+        if self.nodes.is_empty() { return; }
+        let count = self.nodes.len();
+        let cols = (count as f32).sqrt().ceil() as usize;
+        let spacing = 180.0;
+        let mut i = 0;
+        let mut sorted_uris: Vec<_> = self.nodes.keys().cloned().collect();
+        sorted_uris.sort();
+        for uri in sorted_uris {
+            if let Some(node) = self.nodes.get_mut(&uri) {
+                let row = i / cols;
+                let col = i % cols;
+                node.pos = Vec2::new(col as f32 * spacing + 100.0, row as f32 * spacing + 100.0);
+                i += 1;
+            }
+        }
+    }
+
+    fn apply_circular_layout(&mut self) {
+        if self.nodes.is_empty() { return; }
+        let count = self.nodes.len();
+        let r = (count as f32 * 20.0).max(300.0); // Dynamic radius, min 300
+        let mut sorted_uris: Vec<_> = self.nodes.keys().cloned().collect();
+        sorted_uris.sort();
+        for (i, uri) in sorted_uris.into_iter().enumerate() {
+            if let Some(node) = self.nodes.get_mut(&uri) {
+                let angle = (i as f32 / count as f32) * std::f32::consts::TAU;
+                node.pos = Vec2::new(r * angle.cos() + 500.0, r * angle.sin() + 500.0);
+            }
+        }
+    }
+
+    fn apply_concentric_layout(&mut self) {
+        if self.nodes.is_empty() { return; }
+        
+        let mut classes = Vec::new();
+        let mut properties = Vec::new();
+        let mut individuals = Vec::new();
+        let mut literals = Vec::new();
+        
+        for (uri, node) in &self.nodes {
+            match node.node_type {
+                NodeType::Class => classes.push(uri.clone()),
+                NodeType::Property => properties.push(uri.clone()),
+                NodeType::Individual => individuals.push(uri.clone()),
+                NodeType::Literal => literals.push(uri.clone()),
+                NodeType::Blank => {}
+            }
+        }
+        
+        let groups = vec![
+            (classes, 150.0),       // Innermost
+            (properties, 350.0),
+            (individuals, 600.0),
+            (literals, 800.0)       // Outermost
+        ];
+        
+        for (nodes, r) in groups {
+            let count = nodes.len();
+            if count == 0 { continue; }
+            for (i, uri) in nodes.into_iter().enumerate() {
+                if let Some(node) = self.nodes.get_mut(&uri) {
+                    let angle = (i as f32 / count as f32) * std::f32::consts::TAU;
+                    node.pos = Vec2::new(r * angle.cos() + 500.0, r * angle.sin() + 500.0);
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for DarkstarApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        match self.state {
+            AppState::Splash => self.render_splash(ctx),
+            AppState::Onboarding => self.render_onboarding(ctx),
+            AppState::Main => self.render_main(ctx),
+        }
+    }
+}
+
+impl DarkstarApp {
+    fn render_main(&mut self, ctx: &egui::Context) {
         // Apply theme from settings
         ctx.set_visuals(if self.settings.theme_dark { egui::Visuals::dark() } else { egui::Visuals::light() });
 
@@ -473,133 +590,11 @@ impl eframe::App for DarkstarApp {
             }
         });
 
+        // Handle Keyboard Shortcuts
+        self.handle_shortcuts(ctx);
+
         // Top Menu Bar
-        egui::TopBottomPanel::top("top_menu").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                let i = self.i18n();
-                ui.menu_button(i.file, |ui| {
-                    if ui.button(i.new).clicked() {
-                        self.manager = DarkstarManager::new();
-                        self.selected_uri = None;
-                        self.graph_needs_sync = true;
-                        ui.close_menu();
-                    }
-                    if ui.button(i.open).clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Ontology", &["ttl", "nt", "owl"])
-                            .pick_file() {
-                            if let Err(e) = self.manager.load_from_file(&path) {
-                                eprintln!("Failed to load: {}", e);
-                            } else {
-                                self.settings.add_recent(path);
-                                self.graph_needs_sync = true;
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    
-                    ui.menu_button(i.open_recent, |ui| {
-                        let recent = self.settings.recent_files.clone();
-                        for path in recent {
-                            if ui.button(path.display().to_string()).clicked() {
-                                if let Err(e) = self.manager.load_from_file(&path) {
-                                    eprintln!("Failed to load recent: {}", e);
-                                } else {
-                                    self.settings.add_recent(path);
-                                    self.graph_needs_sync = true;
-                                }
-                                ui.close_menu();
-                            }
-                        }
-                    });
-
-                    if ui.button(i.merge).clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Ontology", &["ttl", "nt", "owl"])
-                            .pick_file() {
-                            if let Err(e) = self.manager.merge_ontology(&path, &self.settings.enabled_rules) {
-                                self.status_message = Some((format!("Merge failed: {}", e), std::time::Instant::now()));
-                            } else {
-                                self.status_message = Some(("Ontologies merged".to_string(), std::time::Instant::now()));
-                                self.graph_needs_sync = true;
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    
-                    ui.separator();
-                    if ui.button(i.save).clicked() {
-                        if let Some(path) = &self.manager.active_file_path {
-                            if let Ok(_) = self.manager.save_to_file(path, crate::core::io::OntologyFormat::Turtle, false) {
-                                self.status_message = Some((format!("Saved to {}", path.display()), std::time::Instant::now()));
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button(i.save_as).clicked() {
-                        if let Some(path) = rfd::FileDialog::new().add_filter("Turtle", &["ttl"]).save_file() {
-                            if let Ok(_) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
-                                self.settings.add_recent(path.clone());
-                                self.status_message = Some((format!("Exported to {}", path.display()), std::time::Instant::now()));
-                            }
-                        }
-                        ui.close_menu();
-                    }
-
-                    if ui.button(i.export_inferred).clicked() {
-                        if let Some(path) = rfd::FileDialog::new().add_filter("Turtle", &["ttl"]).save_file() {
-                            if let Ok(_) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, true) {
-                                self.status_message = Some((format!("Inferred graph exported to {}", path.display()), std::time::Instant::now()));
-                            }
-                        }
-                        ui.close_menu();
-                    }
-
-                    ui.separator();
-                    if ui.button(i.preferences).clicked() {
-                        self.show_settings = true;
-                        ui.close_menu();
-                    }
-                    if ui.button(i.exit).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-
-                ui.menu_button(i.edit, |ui| {
-                    if ui.add_enabled(!self.manager.history.is_undo_empty(), egui::Button::new(i.undo)).clicked() {
-                        self.manager.undo();
-                        self.graph_needs_sync = true;
-                        ui.close_menu();
-                    }
-                    if ui.add_enabled(!self.manager.history.is_redo_empty(), egui::Button::new(i.redo)).clicked() {
-                        self.manager.redo();
-                        self.graph_needs_sync = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button(i.copy_entity).clicked() {
-                        if let Some(uri) = &self.selected_uri {
-                            self.clipboard = vec![uri.clone()];
-                        }
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(i.search);
-                        ui.text_edit_singleline(&mut self.search_query);
-                    });
-                });
-
-                ui.menu_button(i.reasoning, |ui| {
-                    if ui.button(i.run_reasoning).clicked() {
-                        self.manager.run_reasoning(&self.settings.enabled_rules);
-                        self.graph_needs_sync = true;
-                        ui.close_menu();
-                    }
-                    ui.checkbox(&mut self.auto_reasoning, i.auto_reasoning);
-                });
-            });
-        });
+        self.render_menu_bar(ctx);
 
         // Bottom Status Bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
@@ -715,6 +710,31 @@ impl eframe::App for DarkstarApp {
             }
         }
 
+        // Confirmation Modal for Revert
+        if self.confirm_revert_dialog {
+            let mut open = true;
+            let i = self.i18n();
+            egui::Window::new(i.revert).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.label(i.confirm_revert_msg);
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(egui::RichText::new(i.confirm_revert_btn).color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(150, 50, 50))).clicked() {
+                        if let Some(path) = self.manager.active_file_path.clone() {
+                            if let Err(e) = self.manager.load_from_file(&path) {
+                                eprintln!("Failed to revert: {}", e);
+                            } else {
+                                self.graph_needs_sync = true;
+                                self.status_message = Some(("Reverted to saved state".to_string(), std::time::Instant::now()));
+                            }
+                        }
+                        self.confirm_revert_dialog = false;
+                    }
+                    if ui.button(i.cancel).clicked() { self.confirm_revert_dialog = false; }
+                });
+            });
+            if !open { self.confirm_revert_dialog = false; }
+        }
+
         // Confirmation Modal for Renaming
         let mut rename_to_apply = None;
         let mut closed_by_button = false;
@@ -728,7 +748,7 @@ impl eframe::App for DarkstarApp {
                     ui.text_edit_singleline(buffer);
                 });
                 ui.horizontal(|ui| {
-                    if ui.button(i.apply).clicked() {
+                    if ui.add_enabled(!buffer.trim().is_empty(), egui::Button::new(i.apply)).clicked() {
                         rename_to_apply = Some((old_uri.clone(), buffer.clone()));
                     }
                     if ui.button(i.cancel).clicked() {
@@ -749,6 +769,95 @@ impl eframe::App for DarkstarApp {
             self.status_message = Some((if self.settings.language == Language::Korean { "이름이 변경되었습니다" } else { "Entity renamed" }.to_string(), std::time::Instant::now()));
         }
 
+        // Modal for Merging Entities
+        let mut merge_to_apply = None;
+        if let Some((buffer, source)) = &mut self.merging_uri {
+            let mut open = true;
+            let mut closed_by_btn = false;
+            egui::Window::new(i.merge_entities).collapsible(false).resizable(false).open(&mut open).show(ctx, |ui| {
+                ui.label(format!("Source: {}", source));
+                ui.horizontal(|ui| {
+                    ui.label(i.merge_entities_prompt);
+                    ui.text_edit_singleline(buffer);
+                });
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(!buffer.trim().is_empty() && buffer.trim() != source, egui::Button::new(i.apply)).clicked() {
+                        merge_to_apply = Some((source.clone(), buffer.clone()));
+                    }
+                    if ui.button(i.cancel).clicked() {
+                        closed_by_btn = true;
+                    }
+                });
+            });
+            if !open || closed_by_btn {
+                self.merging_uri = None;
+            }
+        }
+
+        if let Some((src, target)) = merge_to_apply {
+            self.manager.merge_nodes(&src, &target);
+            self.selected_uri = Some(target);
+            self.merging_uri = None;
+            self.graph_needs_sync = true;
+            self.status_message = Some((if self.settings.language == Language::Korean { "엔티티가 병합되었습니다" } else { "Entities merged" }.to_string(), std::time::Instant::now()));
+        }
+
+        // Ontology Metrics Modal
+        if self.show_metrics_dialog {
+            let mut open = true;
+            let mut close_clicked = false;
+            let i = self.i18n();
+            egui::Window::new(i.ontology_metrics).open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+                use sophia::api::graph::Graph;
+                let graph = &self.manager.memory.main_graph;
+                
+                // Simplified metric counts
+                let mut class_count = 0;
+                let mut obj_prop_count = 0;
+                let mut data_prop_count = 0;
+                let mut ind_count = 0;
+                
+                let rdf_type = "i:http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+                let owl_class = "i:http://www.w3.org/2002/07/owl#Class";
+                let owl_obj_prop = "i:http://www.w3.org/2002/07/owl#ObjectProperty";
+                let owl_data_prop = "i:http://www.w3.org/2002/07/owl#DatatypeProperty";
+                let owl_individual = "i:http://www.w3.org/2002/07/owl#NamedIndividual";
+                
+                for t in graph.triples().flatten() {
+                    let p = crate::rules::extract_str(&t.p());
+                    let o = crate::rules::extract_str(&t.o());
+                    if p == rdf_type {
+                        if o == owl_class { class_count += 1; }
+                        else if o == owl_obj_prop { obj_prop_count += 1; }
+                        else if o == owl_data_prop { data_prop_count += 1; }
+                        else if o == owl_individual { ind_count += 1; }
+                    }
+                }
+                
+                egui::Grid::new("metrics_grid").striped(true).show(ui, |ui| {
+                    ui.label(i.classes); ui.label(class_count.to_string()); ui.end_row();
+                    ui.label(i.obj_props); ui.label(obj_prop_count.to_string()); ui.end_row();
+                    ui.label(i.data_props); ui.label(data_prop_count.to_string()); ui.end_row();
+                    ui.label(i.individuals); ui.label(ind_count.to_string()); ui.end_row();
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Total Triples:");
+                    ui.label(graph.triples().count().to_string());
+                });
+                
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    if ui.button(i.close).clicked() {
+                        close_clicked = true;
+                    }
+                });
+            });
+            if !open || close_clicked {
+                self.show_metrics_dialog = false;
+            }
+        }
+
         // Central Panel: DockArea
         let mut dock_state = std::mem::replace(&mut self.dock_state, DockState::new(vec![]));
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -761,9 +870,448 @@ impl eframe::App for DarkstarApp {
         });
         self.dock_state = dock_state;
     }
+
+    fn render_splash(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().frame(egui::Frame::none().fill(egui::Color32::from_rgb(10, 10, 15))).show(ctx, |ui| {
+            let elapsed = self.splash_start_time.elapsed().as_secs_f32();
+            let i = self.i18n();
+
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.2);
+                
+                // Logo
+                ui.add(egui::Image::new(egui::include_image!("../assets/logo.png")).max_width(300.0).rounding(10.0));
+                
+                ui.add_space(40.0);
+                
+                // Title
+                ui.label(egui::RichText::new("DARKSTAR").size(48.0).strong().color(egui::Color32::WHITE).extra_letter_spacing(4.0));
+                ui.label(egui::RichText::new("Professional Ontology Editor").size(16.0).color(egui::Color32::GRAY));
+                
+                ui.add_space(60.0);
+                
+                // Loading Messages
+                let msg = if elapsed < 1.0 {
+                    i.splash_loading
+                } else if elapsed < 2.5 {
+                    i.splash_checking
+                } else {
+                    "Ready"
+                };
+                
+                ui.label(egui::RichText::new(msg).size(14.0).color(egui::Color32::from_rgb(100, 150, 255)));
+                
+                ui.add_space(20.0);
+                
+                // Simple Progress Bar
+                let progress = (elapsed / 3.0).min(1.0);
+                let bar_width = 200.0;
+                let (rect, _) = ui.allocate_at_least(Vec2::new(bar_width, 4.0), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 20));
+                let mut progress_rect = rect;
+                progress_rect.set_width(bar_width * progress);
+                ui.painter().rect_filled(progress_rect, 2.0, egui::Color32::from_rgb(0, 150, 255));
+            });
+            
+            if elapsed > 3.0 {
+                if self.settings.is_first_run {
+                    self.state = AppState::Onboarding;
+                } else {
+                    self.state = AppState::Main;
+                }
+            }
+            
+            ctx.request_repaint();
+        });
+    }
+
+    fn render_onboarding(&mut self, ctx: &egui::Context) {
+        let i = self.i18n();
+        
+        egui::CentralPanel::default().frame(egui::Frame::none().fill(egui::Color32::from_rgb(10, 10, 20))).show(ctx, |ui| {
+            let card_width = 450.0;
+            let card_height = 380.0;
+            
+            let card_rect = egui::Rect::from_center_size(
+                ui.max_rect().center(),
+                Vec2::new(card_width, card_height)
+            );
+            
+            ui.allocate_new_ui(egui::UiBuilder { max_rect: Some(card_rect), ..Default::default() }, |ui| {
+                egui::Frame::window(&ui.style())
+                    .fill(egui::Color32::from_rgb(25, 25, 35))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 70)))
+                    .rounding(15.0)
+                    .shadow(egui::Shadow { offset: [0.0, 10.0].into(), blur: 20.0, spread: 0.0, color: egui::Color32::from_black_alpha(100) })
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(20.0);
+                            
+                            // Step Indicator (Progress dots)
+                            ui.horizontal(|ui| {
+                                let total_steps = 3;
+                                let dot_spacing = 30.0;
+                                let start_x = (card_width - (total_steps as f32 - 1.0) * dot_spacing) / 2.0 - 15.0;
+                                for s in 0..total_steps {
+                                    let dot_pos = ui.cursor().min + Vec2::new(start_x + s as f32 * dot_spacing, 10.0);
+                                    let active = self.onboarding_step == s;
+                                    let color = if active { egui::Color32::from_rgb(0, 150, 255) } else { egui::Color32::from_gray(60) };
+                                    ui.painter().circle_filled(dot_pos, 5.0, color);
+                                }
+                            });
+                            ui.add_space(40.0);
+                            
+                            ui.heading(egui::RichText::new(i.onboarding_welcome).size(26.0).strong().color(egui::Color32::WHITE));
+                            ui.add_space(20.0);
+                            ui.separator();
+                            ui.add_space(25.0);
+                            
+                            match self.onboarding_step {
+                                0 => { // Language Selection
+                                    ui.label(egui::RichText::new(i.onboarding_lang_desc).size(16.0).color(egui::Color32::GRAY));
+                                    ui.add_space(30.0);
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(30.0);
+                                        if ui.add_sized([160.0, 45.0], egui::SelectableLabel::new(self.settings.language == Language::English, "🇺🇸 English")).clicked() {
+                                            self.settings.language = Language::English;
+                                        }
+                                        ui.add_space(20.0);
+                                        if ui.add_sized([160.0, 45.0], egui::SelectableLabel::new(self.settings.language == Language::Korean, "🇰🇷 한국어")).clicked() {
+                                            self.settings.language = Language::Korean;
+                                        }
+                                    });
+                                }
+                                1 => { // UI Preferences
+                                    ui.label(egui::RichText::new(if self.settings.language == Language::Korean { "✨ 인터페이스 환경을 설정하세요" } else { "✨ Setup your interface" }).size(16.0).color(egui::Color32::GRAY));
+                                    ui.add_space(25.0);
+                                    
+                                    ui.scope(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 15.0;
+                                        ui.horizontal(|ui| {
+                                            ui.label(if self.settings.language == Language::Korean { "화면 테마:" } else { "Theme:" });
+                                            ui.selectable_value(&mut self.settings.theme_dark, true, "🌙 Dark");
+                                            ui.selectable_value(&mut self.settings.theme_dark, false, "☀️ Light");
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label(if self.settings.language == Language::Korean { "UI 크기 조절:" } else { "UI Scale:" });
+                                            ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.8..=1.5).smart_aim(false));
+                                        });
+                                    });
+                                }
+                                _ => { // Completion
+                                    ui.label(egui::RichText::new(i.onboarding_finish).size(18.0).color(egui::Color32::from_rgb(100, 255, 150)));
+                                    ui.add_space(40.0);
+                                    if ui.add_sized([220.0, 50.0], egui::Button::new(egui::RichText::new(i.onboarding_start).size(18.0).strong())).clicked() {
+                                        self.settings.is_first_run = false;
+                                        self.settings.save();
+                                        self.state = AppState::Main;
+                                    }
+                                }
+                            }
+                            
+                            // Bottom Navigation
+                            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                                ui.add_space(20.0);
+                                if self.onboarding_step < 2 {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(card_width - 130.0);
+                                        if ui.add_sized([100.0, 35.0], egui::Button::new(if self.settings.language == Language::Korean { "다음 ➜" } else { "Next ➜" })).clicked() {
+                                            self.onboarding_step += 1;
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                    });
+            });
+        });
+    }
 }
 
 impl DarkstarApp {
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::N))) {
+            self.manager = DarkstarManager::new();
+            self.selected_uri = None;
+            self.graph_needs_sync = true;
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::O))) {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Ontology", &["ttl", "nt", "owl"])
+                .pick_file() {
+                if let Err(e) = self.manager.load_from_file(&path) {
+                    eprintln!("Failed to load: {}", e);
+                } else {
+                    self.settings.add_recent(path);
+                    self.graph_needs_sync = true;
+                }
+            }
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S))) {
+            if let Some(path) = &self.manager.active_file_path {
+                if let Ok(_) = self.manager.save_to_file(path, crate::core::io::OntologyFormat::Turtle, false) {
+                    self.status_message = Some((format!("Saved to {}", path.display()), std::time::Instant::now()));
+                }
+            }
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S))) {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Turtle", &["ttl"]).save_file() {
+                if let Ok(_) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
+                    self.settings.add_recent(path.clone());
+                    self.status_message = Some((format!("Exported to {}", path.display()), std::time::Instant::now()));
+                }
+            }
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Z))) {
+            if !self.manager.history.is_undo_empty() {
+                self.manager.undo();
+                self.graph_needs_sync = true;
+            }
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z))) {
+            if !self.manager.history.is_redo_empty() {
+                self.manager.redo();
+                self.graph_needs_sync = true;
+            }
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::C))) {
+            if let Some(uri) = &self.selected_uri {
+                self.clipboard = vec![uri.clone()];
+                ctx.output_mut(|o| o.copied_text = uri.clone());
+            }
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::R))) {
+            self.manager.run_reasoning(&self.settings.enabled_rules);
+            self.graph_needs_sync = true;
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Plus))) || 
+           ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Equals))) {
+            self.graph_scale = (self.graph_scale * 1.2).clamp(0.05, 10.0);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Minus))) {
+            self.graph_scale = (self.graph_scale / 1.2).clamp(0.05, 10.0);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::Num0))) {
+            self.graph_scale = 1.0;
+        }
+    }
+
+    fn render_menu_bar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("top_menu").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                let i = self.i18n();
+                
+                // File Menu
+                ui.menu_button(i.file, |ui| {
+                    if ui.add(egui::Button::new(i.new).shortcut_text("Cmd+N")).clicked() {
+                        self.manager = DarkstarManager::new();
+                        self.selected_uri = None;
+                        self.graph_needs_sync = true;
+                        ui.close_menu();
+                    }
+                    if ui.add(egui::Button::new(i.open).shortcut_text("Cmd+O")).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Ontology", &["ttl", "nt", "owl"])
+                            .pick_file() {
+                            if let Err(e) = self.manager.load_from_file(&path) {
+                                eprintln!("Failed to load: {}", e);
+                            } else {
+                                self.settings.add_recent(path);
+                                self.graph_needs_sync = true;
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    
+                    ui.menu_button(i.open_recent, |ui| {
+                        let recent = self.settings.recent_files.clone();
+                        for path in recent {
+                            if ui.button(path.display().to_string()).clicked() {
+                                if let Err(e) = self.manager.load_from_file(&path) {
+                                    eprintln!("Failed to load recent: {}", e);
+                                } else {
+                                    self.settings.add_recent(path);
+                                    self.graph_needs_sync = true;
+                                }
+                                ui.close_menu();
+                            }
+                        }
+                    });
+
+                    if ui.button(i.merge).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Ontology", &["ttl", "nt", "owl"])
+                            .pick_file() {
+                            if let Err(e) = self.manager.merge_ontology(&path, &self.settings.enabled_rules) {
+                                self.status_message = Some((format!("Merge failed: {}", e), std::time::Instant::now()));
+                            } else {
+                                self.status_message = Some(("Ontologies merged".to_string(), std::time::Instant::now()));
+                                self.graph_needs_sync = true;
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    
+                    ui.separator();
+                    if ui.add_enabled(self.manager.active_file_path.is_some(), egui::Button::new(i.revert)).clicked() {
+                        self.confirm_revert_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui.add(egui::Button::new(i.save).shortcut_text("Cmd+S")).clicked() {
+                        if let Some(path) = &self.manager.active_file_path {
+                            if let Ok(_) = self.manager.save_to_file(path, crate::core::io::OntologyFormat::Turtle, false) {
+                                self.status_message = Some((format!("Saved to {}", path.display()), std::time::Instant::now()));
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.add(egui::Button::new(i.save_as).shortcut_text("Cmd+Shift+S")).clicked() {
+                        if let Some(path) = rfd::FileDialog::new().add_filter("Turtle", &["ttl"]).save_file() {
+                            if let Ok(_) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
+                                self.settings.add_recent(path.clone());
+                                self.status_message = Some((format!("Exported to {}", path.display()), std::time::Instant::now()));
+                            }
+                        }
+                        ui.close_menu();
+                    }
+
+                    if ui.button(i.export_inferred).clicked() {
+                        if let Some(path) = rfd::FileDialog::new().add_filter("Turtle", &["ttl"]).save_file() {
+                            if let Ok(_) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, true) {
+                                self.status_message = Some((format!("Inferred graph exported to {}", path.display()), std::time::Instant::now()));
+                            }
+                        }
+                        ui.close_menu();
+                    }
+
+                    ui.separator();
+                    if ui.button(i.preferences).clicked() {
+                        self.show_settings = true;
+                        ui.close_menu();
+                    }
+                    if ui.button(i.exit).clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+
+                // Edit Menu
+                ui.menu_button(i.edit, |ui| {
+                    if ui.add_enabled(!self.manager.history.is_undo_empty(), egui::Button::new(i.undo).shortcut_text("Cmd+Z")).clicked() {
+                        self.manager.undo();
+                        self.graph_needs_sync = true;
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(!self.manager.history.is_redo_empty(), egui::Button::new(i.redo).shortcut_text("Cmd+Shift+Z")).clicked() {
+                        self.manager.redo();
+                        self.graph_needs_sync = true;
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(self.selected_uri.is_some(), egui::Button::new(i.delete_entity).shortcut_text("Cmd+Backspace")).clicked() {
+                        self.confirm_delete_uri = self.selected_uri.clone();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.add(egui::Button::new(i.copy_entity).shortcut_text("Cmd+C")).clicked() {
+                        if let Some(uri) = &self.selected_uri {
+                            self.clipboard = vec![uri.clone()];
+                            ctx.output_mut(|o| o.copied_text = uri.clone());
+                        }
+                        ui.close_menu();
+                    }
+                });
+
+                // Refactor Menu
+                ui.menu_button(i.refactor, |ui| {
+                    if ui.add_enabled(self.selected_uri.is_some(), egui::Button::new(i.rename_entity).shortcut_text("Cmd+E")).clicked() {
+                        if let Some(uri) = &self.selected_uri {
+                            self.renaming_uri = Some((uri.clone(), uri.clone()));
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.add_enabled(self.selected_uri.is_some(), egui::Button::new(i.merge_entities)).clicked() {
+                        if let Some(uri) = &self.selected_uri {
+                            self.merging_uri = Some((String::new(), uri.clone()));
+                        }
+                        ui.close_menu();
+                    }
+                });
+
+                // View Menu
+                ui.menu_button(i.view, |ui| {
+                    if ui.add(egui::Button::new(i.zoom_in).shortcut_text("Cmd++")).clicked() {
+                        self.graph_scale = (self.graph_scale * 1.2).clamp(0.05, 10.0);
+                        ui.close_menu();
+                    }
+                    if ui.add(egui::Button::new(i.zoom_out).shortcut_text("Cmd+-")).clicked() {
+                        self.graph_scale = (self.graph_scale / 1.2).clamp(0.05, 10.0);
+                        ui.close_menu();
+                    }
+                    if ui.add(egui::Button::new(i.reset_zoom).shortcut_text("Cmd+0")).clicked() {
+                        self.graph_scale = 1.0;
+                        ui.close_menu();
+                    }
+                    if ui.button(i.fit_screen).clicked() {
+                        self.trigger_fit = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button(if self.settings.theme_dark { "☀ Light Mode" } else { "🌙 Dark Mode" }).clicked() {
+                        self.settings.theme_dark = !self.settings.theme_dark;
+                        self.settings.save();
+                        ui.close_menu();
+                    }
+                });
+
+                // Reasoning Menu
+                ui.menu_button(i.reasoning, |ui| {
+                    if ui.add(egui::Button::new(i.run_reasoning).shortcut_text("Cmd+R")).clicked() {
+                        self.manager.run_reasoning(&self.settings.enabled_rules);
+                        self.graph_needs_sync = true;
+                        ui.close_menu();
+                    }
+                    ui.checkbox(&mut self.auto_reasoning, i.auto_reasoning);
+                });
+
+
+                // Tools Menu
+                ui.menu_button(i.tools, |ui| {
+                    if ui.button(i.ontology_metrics).clicked() {
+                        self.show_metrics_dialog = true;
+                        ui.close_menu();
+                    }
+                });
+
+                // Window Menu
+                ui.menu_button(i.window, |ui| {
+                    if ui.button(i.reset_layout).clicked() {
+                        let mut new_dock = egui_dock::DockState::new(vec![DarkstarTab::Graph]);
+                        let [_left, main] = new_dock.main_surface_mut().split_left(egui_dock::NodeIndex::root(), 0.2, vec![DarkstarTab::Classes]);
+                        let [_main, _bottom] = new_dock.main_surface_mut().split_below(main, 0.75, vec![DarkstarTab::Individuals, DarkstarTab::ObjectProperties, DarkstarTab::DataProperties, DarkstarTab::History]);
+                        self.dock_state = new_dock;
+                        ui.close_menu();
+                    }
+                });
+
+                // Help Menu
+                ui.menu_button(i.help, |ui| {
+                    if ui.button(i.about).clicked() {
+                        self.status_message = Some(("Darkstar Ontology Editor v1.0".to_string(), std::time::Instant::now()));
+                        ui.close_menu();
+                    }
+                });
+
+                // Global Search on the right side
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    let response = ui.add(egui::TextEdit::singleline(&mut self.search_query).desired_width(150.0).hint_text(i.search));
+                    if response.changed() {
+                        // Optional real-time search logic could go here
+                    }
+                });
+            });
+        });
+    }
+
     fn render_custom_graph(&mut self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::drag().union(egui::Sense::click()));
         let rect = response.rect;
@@ -955,6 +1503,7 @@ impl DarkstarApp {
                             NodeType::Class | NodeType::Individual => 20.0,
                             NodeType::Property => 30.0,
                             NodeType::Literal => 25.0,
+                            NodeType::Blank => 4.0,
                         }
                     } * self.graph_scale;
                     
@@ -976,8 +1525,15 @@ impl DarkstarApp {
                         let galley = ui.painter().layout_no_wrap(edge.label.clone(), font_id, color);
                         let rect = galley.rect.expand(2.0).translate(label_pos - galley.rect.center());
                         
-                        painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(alpha.min(160)));
-                        painter.galley(rect.min, galley, color);
+                        let bg_color = if self.settings.theme_dark { 
+                            egui::Color32::from_black_alpha(alpha.min(160)) 
+                        } else { 
+                            egui::Color32::from_white_alpha(alpha.min(180)) 
+                        };
+                        let text_color = if self.settings.theme_dark { egui::Color32::LIGHT_GRAY } else { egui::Color32::DARK_GRAY };
+                        
+                        painter.rect_filled(rect, 2.0, bg_color);
+                        painter.galley(rect.min, galley, text_color);
                     }
                 }
             }
@@ -1016,14 +1572,18 @@ impl DarkstarApp {
                     painter.add(egui::Shape::convex_polygon(vec![p1, p2, p3, p4], color, stroke));
                 }
                 NodeType::Literal => {
-                    let color = egui::Color32::WHITE.linear_multiply(alpha as f32 / 255.0);
+                    let color = if self.settings.theme_dark { egui::Color32::WHITE } else { egui::Color32::from_rgb(240, 240, 240) }.linear_multiply(alpha as f32 / 255.0);
                     let rect_node = egui::Rect::from_center_size(pos, Vec2::new(radius * 2.5, radius * 1.2));
                     painter.rect(rect_node, 0.0, color, stroke);
+                }
+                NodeType::Blank => {
+                    painter.circle(pos, radius, egui::Color32::GRAY, stroke);
                 }
             }
 
             if self.graph_scale > 0.5 && !is_internal {
-                painter.text(pos + Vec2::new(0.0, radius + 8.0 * self.graph_scale), egui::Align2::CENTER_TOP, &node.label, egui::FontId::proportional(12.0 * self.graph_scale), egui::Color32::WHITE);
+                let label_color = if self.settings.theme_dark { egui::Color32::WHITE } else { egui::Color32::BLACK };
+                painter.text(pos + Vec2::new(0.0, radius + 8.0 * self.graph_scale), egui::Align2::CENTER_TOP, &node.label, egui::FontId::proportional(12.0 * self.graph_scale), label_color);
             }
         }
     }
@@ -1141,12 +1701,12 @@ impl DarkstarApp {
         let rdf_type = InferenceEngine::make_term("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
         let mut individuals_by_type: HashMap<String, Vec<String>> = HashMap::new();
         let meta_classes: HashSet<_> = [
-            "http://www.w3.org/2002/07/owl#Class",
-            "http://www.w3.org/2000/01/rdf-schema#Class",
-            "http://www.w3.org/2002/07/owl#ObjectProperty",
-            "http://www.w3.org/2002/07/owl#DatatypeProperty",
-            "http://www.w3.org/1999/02/22-rdf-syntax-ns#Property",
-            "http://www.w3.org/2002/07/owl#Ontology",
+            "i:http://www.w3.org/2002/07/owl#Class",
+            "i:http://www.w3.org/2000/01/rdf-schema#Class",
+            "i:http://www.w3.org/2002/07/owl#ObjectProperty",
+            "i:http://www.w3.org/2002/07/owl#DatatypeProperty",
+            "i:http://www.w3.org/1999/02/22-rdf-syntax-ns#Property",
+            "i:http://www.w3.org/2002/07/owl#Ontology",
         ].into_iter().collect();
 
         let mut known_meta = HashSet::new();
@@ -1542,6 +2102,9 @@ impl<'a> TabViewer for DarkstarTabViewer<'a> {
                                         changed |= ui.selectable_value(&mut self.app.filters.layout_mode, LayoutMode::ForceDirected, "Force-Directed").clicked();
                                         changed |= ui.selectable_value(&mut self.app.filters.layout_mode, LayoutMode::Hierarchical, "Hierarchical").clicked();
                                         changed |= ui.selectable_value(&mut self.app.filters.layout_mode, LayoutMode::Radial, "Radial").clicked();
+                                        changed |= ui.selectable_value(&mut self.app.filters.layout_mode, LayoutMode::Grid, i.layout_grid).clicked();
+                                        changed |= ui.selectable_value(&mut self.app.filters.layout_mode, LayoutMode::Circular, i.layout_circular).clicked();
+                                        changed |= ui.selectable_value(&mut self.app.filters.layout_mode, LayoutMode::Concentric, i.layout_concentric).clicked();
                                         changed
                                     }).inner.unwrap_or(false) {
                                     self.app.graph_needs_sync = true;

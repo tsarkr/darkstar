@@ -167,6 +167,49 @@ impl DarkstarManager {
         }
     }
 
+    pub fn merge_nodes(&mut self, source_uri: &str, target_uri: &str) {
+        let source_prefixed = self.ensure_iri_prefix(source_uri);
+        let target_prefixed = self.ensure_iri_prefix(target_uri);
+        
+        if source_prefixed == target_prefixed { return; }
+        
+        let mut changes = Vec::new();
+        let mut triples_to_process = Vec::new();
+
+        for t in self.memory.asserted_graph.triples() {
+            let t = t.unwrap();
+            let s_str = crate::rules::extract_str(&t.s());
+            let p_str = crate::rules::extract_str(&t.p());
+            let o_str = crate::rules::extract_str(&t.o());
+
+            if s_str == source_prefixed || p_str == source_prefixed || o_str == source_prefixed {
+                triples_to_process.push((s_str, p_str, o_str));
+            }
+        }
+
+        for (s, p, o) in triples_to_process {
+            changes.push(DarkstarEvent::AxiomRemoved { s: s.clone(), p: p.clone(), o: o.clone() });
+            
+            let new_s = if s == source_prefixed { target_prefixed.clone() } else { s };
+            let new_p = if p == source_prefixed { target_prefixed.clone() } else { p };
+            let new_o = if o == source_prefixed { target_prefixed.clone() } else { o };
+            
+            let ns_term = InferenceEngine::make_term(&new_s);
+            let np_term = InferenceEngine::make_term(&new_p);
+            let no_term = InferenceEngine::make_term(&new_o);
+            
+            if !self.memory.asserted_graph.contains(&ns_term, &np_term, &no_term).unwrap() {
+                changes.push(DarkstarEvent::AxiomAdded { s: new_s, p: new_p, o: new_o });
+            }
+        }
+
+        if !changes.is_empty() {
+            let batch = DarkstarEvent::Batch(changes);
+            self.apply_event(batch.clone());
+            self.history.push_change(batch);
+        }
+    }
+
     pub fn delete_entity(&mut self, uri: &str) {
         let prefixed = self.ensure_iri_prefix(uri);
         let mut changes = Vec::new();
