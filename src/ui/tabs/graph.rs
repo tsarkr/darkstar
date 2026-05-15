@@ -8,61 +8,68 @@ impl DarkstarApp {
     pub fn render_graph_tab(&mut self, ui: &mut egui::Ui) {
         let i = self.i18n();
         
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(format!("{}:", i.layout)).size(11.0));
-            let old_layout = self.filters.layout_mode;
-            egui::ComboBox::from_id_salt("layout_mode")
-                .selected_text(egui::RichText::new(format!("{:?}", self.filters.layout_mode)).size(11.0))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::ForceDirected, "Force Directed");
-                    ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::Hierarchical, "Hierarchical");
-                    ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::Radial, "Radial");
-                    ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::Grid, "Grid");
-                    ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::Circular, "Circular");
-                    ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::Concentric, "Concentric");
-                });
-            if self.filters.layout_mode != old_layout {
-                self.graph_needs_sync = true;
-                if self.filters.layout_mode == LayoutMode::ForceDirected { self.simulation_alpha = 20.0; }
-            }
-            
-            ui.separator();
-            let mut changed = false;
-            changed |= ui.checkbox(&mut self.filters.show_individuals, egui::RichText::new(i.individuals).size(11.0)).changed();
-            changed |= ui.checkbox(&mut self.filters.show_schema, egui::RichText::new("Schema").size(11.0)).changed();
-            changed |= ui.checkbox(&mut self.filters.show_inferred, egui::RichText::new(i.show_inferred).size(11.0)).changed();
-            changed |= ui.checkbox(&mut self.filters.show_system, egui::RichText::new(i.show_system).size(11.0)).changed();
-            if changed { 
-                self.graph_needs_sync = true; 
-                self.simulation_alpha = 20.0;
-            }
-            
-            ui.separator();
-            if ui.checkbox(&mut self.filters.focus_mode, egui::RichText::new(i.focus_mode).size(11.0)).changed() { 
-                self.graph_needs_sync = true; 
-                self.simulation_alpha = 20.0;
-            }
-
-            if self.filters.focus_mode {
-                ui.separator();
-                ui.label(egui::RichText::new(format!("{}:", i.expansion)).size(11.0));
-                let old_depth = self.filters.expansion_depth;
-                ui.add(egui::Slider::new(&mut self.filters.expansion_depth, 1..=5));
-                if self.filters.expansion_depth != old_depth { 
-                    self.graph_needs_sync = true; 
-                    self.simulation_alpha = 20.0; 
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{}:", i.layout)).size(11.0));
+                let old_layout = self.filters.layout_mode;
+                egui::ComboBox::from_id_salt("layout_mode")
+                    .selected_text(egui::RichText::new(format!("{:?}", self.filters.layout_mode)).size(11.0))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::ForceDirected, "Force Directed");
+                        ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::Hierarchical, "Hierarchical");
+                        ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::Radial, "Radial");
+                        ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::Grid, "Grid");
+                        ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::Circular, "Circular");
+                        ui.selectable_value(&mut self.filters.layout_mode, LayoutMode::Concentric, "Concentric");
+                    });
+                if self.filters.layout_mode != old_layout {
+                    self.graph_needs_sync = true;
+                    if self.filters.layout_mode == LayoutMode::ForceDirected { self.simulation_alpha = 20.0; }
                 }
-            }
-
-            ui.separator();
-            ui.label(egui::RichText::new(format!("{}:", i.graph_spacing)).size(11.0));
-            if ui.add(egui::Slider::new(&mut self.filters.spacing_multiplier, 0.5..=3.0)).changed() {
-                self.simulation_alpha = 20.0;
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                
+                ui.separator();
+                ui.label(egui::RichText::new(format!("{}:", i.graph_spacing)).size(11.0));
+                if ui.add_sized([100.0, 20.0], egui::Slider::new(&mut self.filters.spacing_multiplier, 0.5..=3.0)).changed() {
+                     self.simulation_alpha = 20.0;
+                }
+                // Correct way to detect change for simulation_alpha
+                
+                ui.separator();
                 if ui.button(egui::RichText::new("⛶").size(11.0)).on_hover_text(i.fit_screen).clicked() { self.trigger_fit = true; }
                 if ui.button(egui::RichText::new("⟲").size(11.0)).on_hover_text(i.sync_reasoner).clicked() { self.graph_needs_sync = true; }
+                ui.separator();
+                if ui.button(egui::RichText::new("📷").size(11.0)).on_hover_text(i.screenshot).clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot);
+                }
+            });
+
+            ui.horizontal(|ui| {
+                let mut changed = false;
+                changed |= ui.checkbox(&mut self.filters.show_individuals, egui::RichText::new(i.individuals).size(11.0)).changed();
+                changed |= ui.checkbox(&mut self.filters.show_schema, egui::RichText::new("Schema").size(11.0)).changed();
+                changed |= ui.checkbox(&mut self.filters.show_inferred, egui::RichText::new(i.show_inferred).size(11.0)).changed();
+                changed |= ui.checkbox(&mut self.filters.show_system, egui::RichText::new(i.show_system).size(11.0)).changed();
+                if changed { 
+                    self.graph_needs_sync = true; 
+                    self.simulation_alpha = 20.0;
+                }
+                
+                ui.separator();
+                if ui.checkbox(&mut self.filters.focus_mode, egui::RichText::new(i.focus_mode).size(11.0)).changed() { 
+                    self.graph_needs_sync = true; 
+                    self.simulation_alpha = 20.0;
+                }
+
+                if self.filters.focus_mode {
+                    ui.separator();
+                    ui.label(egui::RichText::new(format!("{}:", i.expansion)).size(11.0));
+                    let old_depth = self.filters.expansion_depth;
+                    ui.add_sized([80.0, 20.0], egui::Slider::new(&mut self.filters.expansion_depth, 1..=5));
+                    if self.filters.expansion_depth != old_depth { 
+                        self.graph_needs_sync = true; 
+                        self.simulation_alpha = 20.0; 
+                    }
+                }
             });
         });
         ui.separator();
@@ -83,6 +90,7 @@ impl DarkstarApp {
         egui::Frame::none().inner_margin(0.0).show(ui, |ui| {
             let (response, mut painter) = ui.allocate_painter(ui.available_size(), egui::Sense::drag().union(egui::Sense::click()));
             let rect = response.rect;
+            self.last_graph_rect = Some(rect);
             painter.set_clip_rect(rect);
 
         if response.hovered() {
@@ -216,7 +224,29 @@ impl DarkstarApp {
                 let uv_dir = (pv - pu).normalized();
                 let perp = uv_dir.rot90();
 
-                for (i, edge) in group.iter().enumerate() {
+                let mut to_display = Vec::new();
+                let mut processed = vec![false; group.len()];
+                for i in 0..group.len() {
+                    if processed[i] { continue; }
+                    let edge = group[i];
+                    let mut reverse_idx = None;
+                    for j in (i + 1)..group.len() {
+                        if !processed[j] 
+                           && group[j].from == edge.to 
+                           && group[j].to == edge.from 
+                           && group[j].label == edge.label 
+                           && group[j].is_inferred == edge.is_inferred 
+                        {
+                            reverse_idx = Some(j);
+                            break;
+                        }
+                    }
+                    if let Some(ridx) = reverse_idx { processed[ridx] = true; }
+                    processed[i] = true;
+                    to_display.push((edge, reverse_idx.is_some()));
+                }
+
+                for (idx, (edge, is_bidirectional)) in to_display.iter().enumerate() {
                     let (p_start_orig, p_end_orig, current_dir) = if edge.from == u_uri {
                         (pu, pv, uv_dir)
                     } else {
@@ -255,35 +285,42 @@ impl DarkstarApp {
                     let alpha = if edge.is_inferred { 180 } else { 255 };
                     let stroke = egui::Stroke::new(1.5 * self.graph_scale, color.linear_multiply(alpha as f32 / 255.0));
                     
-                    let offset_mag = (i as f32 - (group.len() as f32 - 1.0) / 2.0) * 20.0 * self.graph_scale;
+                    let offset_mag = (idx as f32 - (to_display.len() as f32 - 1.0) / 2.0) * 20.0 * self.graph_scale;
                     let p1_off = p_start + perp * offset_mag;
                     let p2_off = p_end + perp * offset_mag;
 
                     painter.line_segment([p1_off, p2_off], stroke);
                     
                     let head_size = 10.0 * self.graph_scale;
-                    let head = p2_off;
                     let head_dir = current_dir;
                     let head_perp = head_dir.rot90();
-                    painter.line_segment([head, head - (head_dir + head_perp * 0.6).normalized() * head_size], stroke);
-                    painter.line_segment([head, head - (head_dir - head_perp * 0.6).normalized() * head_size], stroke);
+
+                    // Arrowhead at end
+                    let head_end = p2_off;
+                    painter.line_segment([head_end, head_end - (head_dir + head_perp * 0.6).normalized() * head_size], stroke);
+                    painter.line_segment([head_end, head_end - (head_dir - head_perp * 0.6).normalized() * head_size], stroke);
+
+                    // Arrowhead at start for bidirectional
+                    if *is_bidirectional {
+                        let head_start = p1_off;
+                        painter.line_segment([head_start, head_start + (head_dir + head_perp * 0.6).normalized() * head_size], stroke);
+                        painter.line_segment([head_start, head_start + (head_dir - head_perp * 0.6).normalized() * head_size], stroke);
+                    }
 
                     // --- IMPROVED ASSERTION LABEL PLACEMENT ---
                     if self.graph_scale > 0.6 {
                         let mid = p1_off + (p2_off - p1_off) * 0.5;
                         let font = egui::FontId::proportional(9.0 * self.graph_scale);
                         
-                        // Use a smaller perp offset to keep it closer to the line
                         let text_pos = mid + perp * (if offset_mag >= 0.0 { 10.0 } else { -10.0 } * self.graph_scale);
                         
-                        // COLLISION CHECK: Only draw if label is not inside node boundaries
                         let dist_to_start = (text_pos - p_start_orig).length();
                         let dist_to_end = (text_pos - p_end_orig).length();
-                        let safe_dist = radius * 1.5; // Avoid area around nodes
+                        let safe_dist = radius * 1.5;
 
                         if dist_to_start > safe_dist && dist_to_end > safe_dist {
-                            // Removed background rect for transparency
-                            painter.text(text_pos, egui::Align2::CENTER_CENTER, &edge.label, font, if self.settings.theme_dark { egui::Color32::WHITE } else { egui::Color32::BLACK });
+                            let label = edge.label.clone();
+                            painter.text(text_pos, egui::Align2::CENTER_CENTER, &label, font, if self.settings.theme_dark { egui::Color32::WHITE } else { egui::Color32::BLACK });
                         }
                     }
                 }

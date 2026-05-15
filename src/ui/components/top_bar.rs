@@ -69,6 +69,8 @@ impl DarkstarApp {
                     }
                     ui.separator();
                     if ui.button(i.exit).clicked() { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
+                    ui.separator();
+                    if ui.button(i.preferences).clicked() { self.show_settings = true; ui.close_menu(); }
                 });
 
                 // 2. Edit Menu
@@ -81,8 +83,6 @@ impl DarkstarApp {
                     if ui.add_enabled(false, egui::Button::new(i.paste)).clicked() {}
                     ui.separator();
                     if ui.button(i.delete).clicked() { ui.close_menu(); }
-                    ui.separator();
-                    if ui.button(i.preferences).clicked() { self.show_settings = true; ui.close_menu(); }
                 });
 
                 // 3. View Menu
@@ -169,8 +169,6 @@ impl DarkstarApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
-                    if ui.button("⚙").on_hover_text(i.settings_title).clicked() { self.show_settings = true; }
-                    ui.separator();
                     ui.add(egui::TextEdit::singleline(&mut self.search_query).desired_width(150.0).hint_text(i.search));
                 });
             });

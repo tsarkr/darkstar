@@ -45,6 +45,8 @@ pub struct DarkstarApp {
     pub trigger_fit: bool,
     pub graph_offset: Vec2,
     pub graph_scale: f32,
+    pub last_graph_rect: Option<egui::Rect>,
+    pub screenshot_pending: bool,
 
     // Refactor & Bulk State
     pub renaming_uri: Option<(String, String)>,
@@ -114,7 +116,8 @@ impl DarkstarApp {
             id.size = 11.0;
         }
         cc.egui_ctx.set_style(style);
-        cc.egui_ctx.set_pixels_per_point(settings.ui_scale);
+        let native_pp = cc.egui_ctx.native_pixels_per_point().unwrap_or(1.0);
+        cc.egui_ctx.set_pixels_per_point(native_pp * settings.ui_scale);
 
         let mut dock_state = DockState::new(vec![DarkstarTab::Graph, DarkstarTab::SourceEditor]);
         // 1. Split far right for EntityEditor
@@ -145,6 +148,8 @@ impl DarkstarApp {
             trigger_fit: true,
             graph_offset: Vec2::ZERO,
             graph_scale: 1.0,
+            last_graph_rect: None,
+            screenshot_pending: false,
             renaming_uri: None,
             clipboard: Vec::new(),
             selected_individuals: HashSet::new(),
@@ -226,7 +231,16 @@ impl DarkstarApp {
                         ui.horizontal(|ui| {
                             ui.label(i.ui_scale);
                             if ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.5..=2.0)).changed() {
-                                ctx.set_pixels_per_point(self.settings.ui_scale);
+                                changed = true;
+                            }
+                            if ui.button(i.apply).clicked() {
+                                let native_pp = ctx.native_pixels_per_point().unwrap_or(1.0);
+                                ctx.set_pixels_per_point(native_pp * self.settings.ui_scale);
+                            }
+                            if ui.button("1.0").on_hover_text("기본 크기(1.0)로 초기화").clicked() {
+                                self.settings.ui_scale = 1.0;
+                                let native_pp = ctx.native_pixels_per_point().unwrap_or(1.0);
+                                ctx.set_pixels_per_point(native_pp);
                                 changed = true;
                             }
                         });
@@ -476,6 +490,44 @@ impl DarkstarApp {
 
 impl eframe::App for DarkstarApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle Screenshot
+        for event in ctx.input(|i| i.raw.events.clone()) {
+            if let egui::Event::Screenshot { image, .. } = event {
+                let ppp = ctx.pixels_per_point();
+                if let (Some(path), Some(rect)) = (
+                    rfd::FileDialog::new()
+                        .set_file_name("graph_capture.png")
+                        .add_filter("PNG Image", &["png"])
+                        .save_file(),
+                    self.last_graph_rect
+                ) {
+                    let left = (rect.min.x * ppp).round() as u32;
+                    let top = (rect.min.y * ppp).round() as u32;
+                    let width = (rect.width() * ppp).round() as u32;
+                    let height = (rect.height() * ppp).round() as u32;
+
+                    let full_width = image.width() as u32;
+                    let full_height = image.height() as u32;
+                    let pixels = image.as_raw();
+
+                    let mut img_buf = image::ImageBuffer::new(width, height);
+                    for (x, y, pixel) in img_buf.enumerate_pixels_mut() {
+                        let px = left + x;
+                        let py = top + y;
+                        if px < full_width && py < full_height {
+                            let idx = (py as usize * full_width as usize + px as usize) * 4;
+                            if idx + 3 < pixels.len() {
+                                *pixel = image::Rgba([pixels[idx], pixels[idx+1], pixels[idx+2], pixels[idx+3]]);
+                            }
+                        }
+                    }
+                    if let Err(e) = img_buf.save(path) {
+                        eprintln!("Failed to save screenshot: {}", e);
+                    }
+                }
+            }
+        }
+
         if ctx.input(|i| i.viewport().close_requested()) {
             if self.manager.needs_save && !self.allowed_to_close {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
