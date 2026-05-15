@@ -12,14 +12,14 @@ impl DarkstarApp {
                 ui.label(egui::RichText::new(if filter_object { i.obj_props } else { i.data_props }).size(11.0).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(if filter_object { i.add_subproperty } else { i.add_sibling_property }).clicked() {
-                        let new_uri = if filter_object { "i:NewObjectProperty" } else { "i:NewDataProperty" };
-                        if filter_object { self.manager.add_object_property(new_uri.to_string()); }
-                        else { self.manager.add_data_property(new_uri.to_string()); }
+                        let new_uri = self.generate_unique_uri(if filter_object { "NewObjectProperty" } else { "NewDataProperty" });
+                        if filter_object { self.manager.add_object_property(new_uri.clone()); }
+                        else { self.manager.add_data_property(new_uri.clone()); }
                         
                         if let Some(parent) = &self.selected_uri {
-                            self.manager.add_subproperty(new_uri.to_string(), parent.clone());
+                            self.manager.add_subproperty(new_uri.clone(), parent.clone());
                         }
-                        self.selected_uri = Some(new_uri.to_string());
+                        self.selected_uri = Some(new_uri);
                     }
                 });
             });

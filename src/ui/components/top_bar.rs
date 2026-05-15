@@ -43,8 +43,8 @@ impl DarkstarApp {
 
                     ui.separator();
                     if ui.button(i.save).clicked() {
-                        if let Some(path) = &self.manager.active_file_path {
-                            if let Err(e) = self.manager.save_to_file(path, crate::core::io::OntologyFormat::Turtle, false) { eprintln!("Save error: {}", e); }
+                        if let Some(path) = self.manager.active_file_path.clone() {
+                            if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) { eprintln!("Save error: {}", e); }
                         } else {
                             if let Some(path) = rfd::FileDialog::new().set_file_name("ontology.owl").save_file() {
                                 if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) { eprintln!("Save error: {}", e); }

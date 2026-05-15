@@ -54,6 +54,12 @@ impl DarkstarApp {
                 }
             }
 
+            ui.separator();
+            ui.label(egui::RichText::new(format!("{}:", i.graph_spacing)).size(11.0));
+            if ui.add(egui::Slider::new(&mut self.filters.spacing_multiplier, 0.5..=3.0)).changed() {
+                self.simulation_alpha = 20.0;
+            }
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(egui::RichText::new("⛶").size(11.0)).on_hover_text(i.fit_screen).clicked() { self.trigger_fit = true; }
                 if ui.button(egui::RichText::new("⟲").size(11.0)).on_hover_text(i.sync_reasoner).clicked() { self.graph_needs_sync = true; }
@@ -61,23 +67,23 @@ impl DarkstarApp {
         });
         ui.separator();
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            if self.filters.focus_mode && self.selected_uri.is_none() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(egui::RichText::new(i.select_entity).size(11.0).weak());
-                });
-            } else {
-                if self.graph_needs_sync {
-                    self.sync_graph();
-                }
-                self.render_custom_graph(ui);
+        if self.filters.focus_mode && self.selected_uri.is_none() {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new(i.select_entity).size(11.0).weak());
+            });
+        } else {
+            if self.graph_needs_sync {
+                self.sync_graph();
             }
-        });
+            self.render_custom_graph(ui);
+        }
     }
 
     pub fn render_custom_graph(&mut self, ui: &mut egui::Ui) {
-        let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::drag().union(egui::Sense::click()));
-        let rect = response.rect;
+        egui::Frame::none().inner_margin(0.0).show(ui, |ui| {
+            let (response, mut painter) = ui.allocate_painter(ui.available_size(), egui::Sense::drag().union(egui::Sense::click()));
+            let rect = response.rect;
+            painter.set_clip_rect(rect);
 
         if response.hovered() {
             let zoom_delta = ui.input(|i| i.smooth_scroll_delta.y);
@@ -128,7 +134,7 @@ impl DarkstarApp {
                     let v = &keys[j];
                     let diff = self.nodes[u].pos - self.nodes[v].pos;
                     let dist_sq = diff.length_sq().max(1000.0);
-                    let force = diff.normalized() * (75000.0 / dist_sq) * self.simulation_alpha.max(1.0);
+                    let force = diff.normalized() * (75000.0 * self.filters.spacing_multiplier / dist_sq) * self.simulation_alpha.max(1.0);
                     *forces.entry(u.clone()).or_default() += force;
                     *forces.entry(v.clone()).or_default() -= force;
                 }
@@ -151,7 +157,7 @@ impl DarkstarApp {
                 if let (Some(n1), Some(n2)) = (self.nodes.get(&edge.from), self.nodes.get(&edge.to)) {
                     let diff = n1.pos - n2.pos;
                     let dist = diff.length().max(1.0);
-                    let force = diff.normalized() * (dist - 250.0) * -0.25 * self.simulation_alpha.max(1.0).sqrt();
+                    let force = diff.normalized() * (dist - 250.0 * self.filters.spacing_multiplier) * -0.25 * self.simulation_alpha.max(1.0).sqrt();
                     *forces.entry(edge.from.clone()).or_default() += force;
                     *forces.entry(edge.to.clone()).or_default() -= force;
                 }
@@ -323,6 +329,7 @@ impl DarkstarApp {
                 painter.text(text_pos, egui::Align2::CENTER_TOP, &node.label, font, if self.settings.theme_dark { egui::Color32::WHITE } else { egui::Color32::BLACK });
             }
         }
+        });
     }
 
     fn group_edges(&self) -> HashMap<(String, String), Vec<&crate::ui::GraphEdge>> {

@@ -12,11 +12,12 @@ impl DarkstarApp {
                 ui.label(egui::RichText::new(i.class_hierarchy).size(11.0).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(i.add_subclass).clicked() {
-                        self.manager.add_class("i:NewClass".to_string());
+                        let new_uri = self.generate_unique_uri("NewClass");
+                        self.manager.add_class(new_uri.clone());
                         if let Some(parent) = &self.selected_uri {
-                            self.manager.add_subclass("i:NewClass".to_string(), parent.clone());
+                            self.manager.add_subclass(new_uri.clone(), parent.clone());
                         }
-                        self.selected_uri = Some("i:NewClass".to_string());
+                        self.selected_uri = Some(new_uri);
                     }
                 });
             });

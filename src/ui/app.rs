@@ -9,6 +9,9 @@ use crate::core::plugin::PluginManager;
 use crate::core::settings::{AppSettings, Language};
 use crate::core::l10n::L10n;
 use crate::ui::{DarkstarTab, GraphNode, GraphEdge, GraphFilters, AppState};
+use crate::rules::engine::InferenceEngine;
+use sophia::api::prelude::*;
+use sophia::api::term::matcher::Any;
 
 pub struct DarkstarApp {
     pub manager: DarkstarManager,
@@ -52,6 +55,15 @@ pub struct DarkstarApp {
     pub merging_uri: Option<(String, String)>,
     pub annotation_buffer: Option<(String, String)>,
     pub simulation_alpha: f32,
+    
+    // Source Editor State
+    pub source_code_buffer: String,
+    pub source_code_error: Option<String>,
+    pub source_needs_sync: bool,
+    
+    // Exit Dialog
+    pub show_exit_dialog: bool,
+    pub allowed_to_close: bool,
     
     // Plugins
     pub plugin_manager: PluginManager,
@@ -104,7 +116,7 @@ impl DarkstarApp {
         cc.egui_ctx.set_style(style);
         cc.egui_ctx.set_pixels_per_point(settings.ui_scale);
 
-        let mut dock_state = DockState::new(vec![DarkstarTab::Graph]);
+        let mut dock_state = DockState::new(vec![DarkstarTab::Graph, DarkstarTab::SourceEditor]);
         // 1. Split far right for EntityEditor
         let [left_and_center, _right] = dock_state.main_surface_mut().split_right(egui_dock::NodeIndex::root(), 0.8, vec![DarkstarTab::EntityEditor]);
         // 2. Split far left for Classes
@@ -141,6 +153,11 @@ impl DarkstarApp {
             merging_uri: None,
             annotation_buffer: None,
             simulation_alpha: 1.0,
+            source_code_buffer: String::new(),
+            source_code_error: None,
+            source_needs_sync: true,
+            show_exit_dialog: false,
+            allowed_to_close: false,
             plugin_manager: PluginManager::new(),
             state: AppState::Splash,
             splash_start_time: std::time::Instant::now(),
@@ -166,9 +183,12 @@ impl DarkstarApp {
     pub fn render_main(&mut self, ctx: &egui::Context) {
         ctx.set_visuals(if self.settings.theme_dark { egui::Visuals::dark() } else { egui::Visuals::light() });
 
-        if self.auto_reasoning && self.manager.is_dirty {
-            self.manager.run_reasoning(&self.settings.enabled_rules);
-            self.graph_needs_sync = true;
+        if self.manager.is_dirty {
+            self.source_needs_sync = true;
+            if self.auto_reasoning {
+                self.manager.run_reasoning(&self.settings.enabled_rules);
+                self.graph_needs_sync = true;
+            }
         }
 
         self.render_plugin_guide(ctx);
@@ -176,6 +196,7 @@ impl DarkstarApp {
         self.render_settings(ctx);
         self.render_help(ctx);
         self.render_top_bar(ctx);
+        self.render_dialogs(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut dock_state = std::mem::replace(&mut self.dock_state, egui_dock::DockState::new(vec![]));
             {
@@ -296,14 +317,179 @@ impl DarkstarApp {
         if close_clicked { show = false; }
         self.show_help = show;
     }
+
+    fn render_dialogs(&mut self, ctx: &egui::Context) {
+        let i = self.i18n();
+        // use removed here as we added them to top level
+
+        // 1. Delete Confirmation
+        if let Some(uri) = self.confirm_delete_uri.clone() {
+            let mut open = true;
+            egui::Window::new(i.delete)
+                .open(&mut open)
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(i.confirm_delete_msg);
+                        ui.add_space(5.0);
+                        ui.label(egui::RichText::new(&uri).monospace().color(egui::Color32::GRAY));
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Confirm").clicked() {
+                                let s_term = InferenceEngine::make_term(&uri);
+                                let mut to_delete = Vec::new();
+                                for t in self.manager.memory.asserted_graph.triples().flatten() {
+                                    if s_term == t.s() || s_term == t.o() {
+                                        to_delete.push((crate::rules::extract_str(&t.s()), crate::rules::extract_str(&t.p()), crate::rules::extract_str(&t.o())));
+                                    }
+                                }
+                                for (s, p, o) in to_delete {
+                                    self.manager.remove_assertion(s, p, o);
+                                }
+                                self.selected_uri = None;
+                                self.confirm_delete_uri = None;
+                                self.graph_needs_sync = true;
+                            }
+                            if ui.button(i.close).clicked() {
+                                self.confirm_delete_uri = None;
+                            }
+                        });
+                    });
+                });
+            if !open { self.confirm_delete_uri = None; }
+        }
+
+        // 2. Rename Dialog
+        if let Some((old_uri, mut new_label)) = self.renaming_uri.clone() {
+            let mut open = true;
+            egui::Window::new(i.rename_entity)
+                .open(&mut open)
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.label(format!("Old URI: {}", old_uri));
+                        ui.horizontal(|ui| {
+                            ui.label("New Label:");
+                            ui.text_edit_singleline(&mut new_label);
+                        });
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Rename (Apply Label)").clicked() {
+                                let rdfs_label = "http://www.w3.org/2000/01/rdf-schema#label".to_string();
+                                let s_term = InferenceEngine::make_term(&old_uri);
+                                let p_term = InferenceEngine::make_term(&rdfs_label);
+                                let mut to_remove = Vec::new();
+                                for t in self.manager.memory.asserted_graph.triples_matching(Some(&s_term), Some(&p_term), Any).flatten() {
+                                    to_remove.push(crate::rules::extract_str(&t.o()));
+                                }
+                                for old_val in to_remove {
+                                    self.manager.remove_assertion(old_uri.clone(), rdfs_label.clone(), old_val);
+                                }
+                                self.manager.add_assertion(old_uri.clone(), rdfs_label, format!("l:{}", new_label));
+                                self.renaming_uri = None;
+                                self.graph_needs_sync = true;
+                            }
+                            if ui.button(i.close).clicked() {
+                                self.renaming_uri = None;
+                            }
+                        });
+                    });
+                });
+            if !open { self.renaming_uri = None; }
+            else if self.renaming_uri.is_some() { self.renaming_uri = Some((old_uri, new_label)); }
+        }
+    }
+
+    pub fn generate_unique_uri(&self, prefix: &str) -> String {
+        let mut i = 1;
+        loop {
+            let uri = format!("i:{}_{}", prefix, i);
+            let s_term = InferenceEngine::make_term(&uri);
+            if !self.manager.memory.main_graph.triples_matching(Some(&s_term), Any, Any).flatten().next().is_some() {
+                return uri;
+            }
+            i += 1;
+        }
+    }
+
+    pub fn render_exit_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_exit_dialog { return; }
+        
+        let i = self.i18n();
+        let mut open = self.show_exit_dialog;
+        
+        egui::Window::new(i.unsaved_changes_title)
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.vertical(|ui| {
+                    ui.label(i.unsaved_changes_msg);
+                    ui.add_space(10.0);
+                    
+                    ui.horizontal(|ui| {
+                        if ui.button(i.save_and_quit).clicked() {
+                            // If we have a file, save and close
+                            if let Some(path) = self.manager.active_file_path.clone() {
+                                if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
+                                    eprintln!("Save error: {}", e);
+                                } else {
+                                    self.allowed_to_close = true;
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                }
+                            } else {
+                                // Save As dialog
+                                if let Some(path) = rfd::FileDialog::new().set_file_name("ontology.owl").save_file() {
+                                    if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
+                                        eprintln!("Save error: {}", e);
+                                    } else {
+                                        self.settings.add_recent(path);
+                                        self.allowed_to_close = true;
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    }
+                                }
+                            }
+                            self.show_exit_dialog = false;
+                        }
+                        
+                        if ui.button(i.quit_without_saving).clicked() {
+                            self.allowed_to_close = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            self.show_exit_dialog = false;
+                        }
+                        
+                        if ui.button(i.close).clicked() {
+                            self.show_exit_dialog = false;
+                        }
+                    });
+                });
+            });
+            
+        if !open { self.show_exit_dialog = false; }
+    }
 }
 
 impl eframe::App for DarkstarApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.manager.needs_save && !self.allowed_to_close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.show_exit_dialog = true;
+            }
+        }
+
         match self.state {
             AppState::Splash => self.render_splash(ctx),
             AppState::Onboarding => self.render_onboarding(ctx),
-            AppState::Main => self.render_main(ctx),
+            AppState::Main => {
+                self.render_main(ctx);
+                self.render_exit_dialog(ctx);
+            }
         }
     }
 }

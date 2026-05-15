@@ -20,6 +20,7 @@ impl<'a> TabViewer for DarkstarTabViewer<'a> {
             DarkstarTab::DataProperties => i.data_props.into(),
             DarkstarTab::Individuals => i.individuals.into(),
             DarkstarTab::Graph => i.graph_view.into(),
+            DarkstarTab::SourceEditor => i.source_editor.into(),
             DarkstarTab::EntityEditor => i.property_editor.into(),
             DarkstarTab::History => i.history.into(),
             DarkstarTab::Plugin(name) => {
@@ -40,6 +41,9 @@ impl<'a> TabViewer for DarkstarTabViewer<'a> {
             DarkstarTab::Individuals => self.app.render_individuals_tab(ui),
             DarkstarTab::Graph => {
                 self.app.render_graph_tab(ui);
+            }
+            DarkstarTab::SourceEditor => {
+                self.app.render_source_editor_tab(ui);
             }
             DarkstarTab::EntityEditor => {
                 self.app.render_entity_editor_tab(ui);

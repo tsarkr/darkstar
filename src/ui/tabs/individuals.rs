@@ -12,8 +12,9 @@ impl DarkstarApp {
                 ui.label(egui::RichText::new(i.individuals).size(11.0).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("✚ New Individual").clicked() {
-                        self.manager.add_individual("i:NewIndividual".to_string());
-                        self.selected_uri = Some("i:NewIndividual".to_string());
+                        let new_uri = self.generate_unique_uri("NewIndividual");
+                        self.manager.add_individual(new_uri.clone());
+                        self.selected_uri = Some(new_uri);
                     }
                 });
             });

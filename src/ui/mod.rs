@@ -55,6 +55,7 @@ pub struct GraphFilters {
     pub focus_mode: bool,
     pub expansion_depth: usize,
     pub show_system: bool,
+    pub spacing_multiplier: f32,
 }
 
 impl Default for GraphFilters {
@@ -68,6 +69,7 @@ impl Default for GraphFilters {
             focus_mode: true,
             expansion_depth: 1,
             show_system: false,
+            spacing_multiplier: 1.0,
         }
     }
 }
@@ -81,5 +83,6 @@ pub enum DarkstarTab {
     Individuals,
     History,
     EntityEditor,
+    SourceEditor,
     Plugin(String),
 }

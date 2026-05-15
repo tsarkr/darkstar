@@ -126,6 +126,16 @@ pub struct L10n {
     pub property_editor: &'static str,
     pub add_relation: &'static str,
     pub object_label: &'static str,
+    pub source_editor: &'static str,
+    pub apply_changes: &'static str,
+    pub sync_from_graph: &'static str,
+    pub graph_spacing: &'static str,
+    
+    // Exit Dialog
+    pub unsaved_changes_title: &'static str,
+    pub unsaved_changes_msg: &'static str,
+    pub save_and_quit: &'static str,
+    pub quit_without_saving: &'static str,
 }
 
 impl L10n {
@@ -257,6 +267,15 @@ impl L10n {
                 property_editor: "Property Editor",
                 add_relation: "Add Relation",
                 object_label: "Object",
+                source_editor: "Source Editor",
+                apply_changes: "Apply Changes",
+                sync_from_graph: "Sync from Graph",
+                graph_spacing: "Spacing",
+                
+                unsaved_changes_title: "Unsaved Changes",
+                unsaved_changes_msg: "You have unsaved changes. Do you want to save before quitting?",
+                save_and_quit: "Save and Quit",
+                quit_without_saving: "Quit Without Saving",
             },
             Language::Korean => Self {
                 file: "파일",
@@ -384,6 +403,15 @@ impl L10n {
                 property_editor: "속성 편집기",
                 add_relation: "관계 추가",
                 object_label: "목적어",
+                source_editor: "소스 편집기",
+                apply_changes: "변경사항 적용",
+                sync_from_graph: "그래프에서 동기화",
+                graph_spacing: "간격",
+                
+                unsaved_changes_title: "저장되지 않은 변경사항",
+                unsaved_changes_msg: "저장하지 않은 작업이 있습니다. 종료하기 전에 저장하시겠습니까?",
+                save_and_quit: "저장 후 종료",
+                quit_without_saving: "저장하지 않고 종료",
             },
         }
     }

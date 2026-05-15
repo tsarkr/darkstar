@@ -9,6 +9,7 @@ pub struct DarkstarManager {
     pub active_file_path: Option<PathBuf>,
     pub history: ChangeHistory,
     pub is_dirty: bool,
+    pub needs_save: bool,
     engine: InferenceEngine,
 }
 
@@ -19,6 +20,7 @@ impl DarkstarManager {
             active_file_path: None,
             history: ChangeHistory::new(),
             is_dirty: false,
+            needs_save: false,
             engine: InferenceEngine::new(),
         }
     }
@@ -28,6 +30,7 @@ impl DarkstarManager {
         self.active_file_path = None;
         self.history.clear();
         self.is_dirty = false;
+        self.needs_save = false;
     }
 
     pub fn add_assertion(&mut self, s: String, p: String, o: String) {
@@ -45,6 +48,7 @@ impl DarkstarManager {
         self.memory.main_graph.insert(&s_term, &p_term, &o_term).unwrap();
         self.memory.delta_graph.insert(&s_term, &p_term, &o_term).unwrap();
         self.is_dirty = true;
+        self.needs_save = true;
     }
 
     pub fn remove_assertion(&mut self, s: String, p: String, o: String) {
@@ -61,6 +65,7 @@ impl DarkstarManager {
         self.memory.asserted_graph.remove(&s_term, &p_term, &o_term).unwrap();
         self.memory.main_graph.remove(&s_term, &p_term, &o_term).unwrap();
         self.is_dirty = true;
+        self.needs_save = true;
     }
 
     pub fn undo(&mut self) {
@@ -171,6 +176,65 @@ impl DarkstarManager {
         Ok(())
     }
 
+    pub fn replace_from_string(&mut self, data: &str, format: crate::core::io::OntologyFormat) -> Result<(), Box<dyn std::error::Error>> {
+        let rules_settings = crate::core::settings::ReasonerRules::default();
+        let mut temp_graph = sophia::inmem::graph::FastGraph::new();
+        match format {
+            crate::core::io::OntologyFormat::Turtle => {
+                let parser = sophia::turtle::parser::turtle::TurtleParser { base: None }.parse_str(&data);
+                temp_graph.insert_all(parser)?;
+            },
+            crate::core::io::OntologyFormat::NTriples => {
+                let parser = sophia::turtle::parser::nt::NTriplesParser {}.parse_str(&data);
+                temp_graph.insert_all(parser)?;
+            }
+        }
+
+        let mut changes = Vec::new();
+        
+        // Find newly added triples
+        for t in temp_graph.triples() {
+            let t = t?;
+            let s = crate::rules::extract_str(&t.s());
+            let p = crate::rules::extract_str(&t.p());
+            let o = crate::rules::extract_str(&t.o());
+            
+            let s_term = InferenceEngine::make_term(&s);
+            let p_term = InferenceEngine::make_term(&p);
+            let o_term = InferenceEngine::make_term(&o);
+            
+            if !self.memory.asserted_graph.contains(&s_term, &p_term, &o_term).unwrap() {
+                changes.push(DarkstarEvent::AxiomAdded { s, p, o });
+            }
+        }
+        
+        // Find removed triples
+        let mut removed = Vec::new();
+        for t in self.memory.asserted_graph.triples().flatten() {
+            let s = crate::rules::extract_str(&t.s());
+            let p = crate::rules::extract_str(&t.p());
+            let o = crate::rules::extract_str(&t.o());
+            
+            let s_term = InferenceEngine::make_term(&s);
+            let p_term = InferenceEngine::make_term(&p);
+            let o_term = InferenceEngine::make_term(&o);
+            
+            if !temp_graph.contains(&s_term, &p_term, &o_term).unwrap() {
+                removed.push(DarkstarEvent::AxiomRemoved { s, p, o });
+            }
+        }
+        changes.extend(removed);
+
+        if !changes.is_empty() {
+            let batch = DarkstarEvent::Batch(changes);
+            self.apply_event(batch.clone());
+            self.history.push_change(batch);
+            self.run_reasoning(&rules_settings);
+        }
+        
+        Ok(())
+    }
+
     pub fn load_from_file(&mut self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         self.memory.clear();
         let data = std::fs::read_to_string(path)?;
@@ -181,6 +245,7 @@ impl DarkstarManager {
         };
         self.load_from_string(&data, format)?;
         self.active_file_path = Some(path.to_path_buf());
+        self.needs_save = false;
         Ok(())
     }
 
@@ -208,9 +273,10 @@ impl DarkstarManager {
         }
     }
 
-    pub fn save_to_file(&self, path: &std::path::Path, format: crate::core::io::OntologyFormat, include_inferred: bool) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_to_file(&mut self, path: &std::path::Path, format: crate::core::io::OntologyFormat, include_inferred: bool) -> Result<(), Box<dyn std::error::Error>> {
         let data = self.serialize_to_string(format, include_inferred)?;
         std::fs::write(path, data)?;
+        self.needs_save = false;
         Ok(())
     }
 }
