@@ -97,7 +97,7 @@ cargo run --release
 
 ## License / 라이선스
 
-Apache License 2.0 or MIT (Dual Licensed)
+TBD (To Be Determined) / 미정
 
 ## Authors / 작성자
 
