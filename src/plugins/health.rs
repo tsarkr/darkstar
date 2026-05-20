@@ -134,5 +134,7 @@ impl DarkstarPlugin for HealthCheckerPlugin {
         });
     }
 
-    fn handle_event(&mut self, _event: &DarkstarEvent) {}
+    fn handle_event(&mut self, _event: &DarkstarEvent, manager: &mut DarkstarManager) {
+        self.run_check(manager);
+    }
 }

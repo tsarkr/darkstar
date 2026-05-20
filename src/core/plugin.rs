@@ -12,7 +12,7 @@ pub trait DarkstarPlugin {
     fn version(&self) -> &str;
     fn init(&mut self, _manager: &mut DarkstarManager) {}
     fn render_tab(&mut self, ui: &mut egui::Ui, manager: &mut DarkstarManager, l10n: &L10n);
-    fn handle_event(&mut self, _event: &DarkstarEvent) {}
+    fn handle_event(&mut self, _event: &DarkstarEvent, _manager: &mut DarkstarManager) {}
 }
 
 pub struct PluginManager {

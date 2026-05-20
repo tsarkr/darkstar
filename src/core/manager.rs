@@ -10,6 +10,7 @@ pub struct DarkstarManager {
     pub history: ChangeHistory,
     pub is_dirty: bool,
     pub needs_save: bool,
+    pub event_queue: Vec<DarkstarEvent>,
     engine: InferenceEngine,
 }
 
@@ -21,6 +22,7 @@ impl DarkstarManager {
             history: ChangeHistory::new(),
             is_dirty: false,
             needs_save: false,
+            event_queue: Vec::new(),
             engine: InferenceEngine::new(),
         }
     }
@@ -31,11 +33,13 @@ impl DarkstarManager {
         self.history.clear();
         self.is_dirty = false;
         self.needs_save = false;
+        self.event_queue.clear();
     }
 
     pub fn add_assertion(&mut self, s: String, p: String, o: String) {
         let event = DarkstarEvent::AxiomAdded { s: s.clone(), p: p.clone(), o: o.clone() };
-        self.history.push_change(event);
+        self.history.push_change(event.clone());
+        self.event_queue.push(event);
         self.add_assertion_internal(s, p, o);
     }
 
@@ -53,7 +57,8 @@ impl DarkstarManager {
 
     pub fn remove_assertion(&mut self, s: String, p: String, o: String) {
         let event = DarkstarEvent::AxiomRemoved { s: s.clone(), p: p.clone(), o: o.clone() };
-        self.history.push_change(event);
+        self.history.push_change(event.clone());
+        self.event_queue.push(event);
         self.remove_assertion_internal(s, p, o);
     }
 
@@ -70,12 +75,15 @@ impl DarkstarManager {
 
     pub fn undo(&mut self) {
         if let Some(event) = self.history.pop_undo() {
+            let rev = event.reverse();
+            self.event_queue.push(rev);
             self.apply_event_reverse(event);
         }
     }
 
     pub fn redo(&mut self) {
         if let Some(event) = self.history.pop_redo() {
+            self.event_queue.push(event.clone());
             self.apply_event(event);
         }
     }
@@ -169,7 +177,8 @@ impl DarkstarManager {
         if !changes.is_empty() {
             let batch = DarkstarEvent::Batch(changes);
             self.apply_event(batch.clone());
-            self.history.push_change(batch);
+            self.history.push_change(batch.clone());
+            self.event_queue.push(batch);
             self.run_reasoning(&rules_settings);
         }
         
@@ -228,7 +237,8 @@ impl DarkstarManager {
         if !changes.is_empty() {
             let batch = DarkstarEvent::Batch(changes);
             self.apply_event(batch.clone());
-            self.history.push_change(batch);
+            self.history.push_change(batch.clone());
+            self.event_queue.push(batch);
             self.run_reasoning(&rules_settings);
         }
         

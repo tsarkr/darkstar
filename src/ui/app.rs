@@ -188,6 +188,14 @@ impl DarkstarApp {
     pub fn render_main(&mut self, ctx: &egui::Context) {
         ctx.set_visuals(if self.settings.theme_dark { egui::Visuals::dark() } else { egui::Visuals::light() });
 
+        // Drain events and notify plugins
+        let events: Vec<_> = self.manager.event_queue.drain(..).collect();
+        for event in events {
+            for plugin in &mut self.plugin_manager.plugins {
+                plugin.handle_event(&event, &mut self.manager);
+            }
+        }
+
         if self.manager.is_dirty {
             self.source_needs_sync = true;
             if self.auto_reasoning {
@@ -276,7 +284,11 @@ impl DarkstarApp {
             });
         
         if close_clicked { show = false; }
-        if changed { self.settings.save(); }
+        if changed {
+            self.settings.save();
+            self.manager.is_dirty = true;
+            self.graph_needs_sync = true;
+        }
         self.show_settings = show;
     }
 

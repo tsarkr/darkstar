@@ -5,6 +5,20 @@ pub enum DarkstarEvent {
     Batch(Vec<DarkstarEvent>),
 }
 
+impl DarkstarEvent {
+    pub fn reverse(&self) -> Self {
+        match self {
+            DarkstarEvent::AxiomAdded { s, p, o } => DarkstarEvent::AxiomRemoved { s: s.clone(), p: p.clone(), o: o.clone() },
+            DarkstarEvent::AxiomRemoved { s, p, o } => DarkstarEvent::AxiomAdded { s: s.clone(), p: p.clone(), o: o.clone() },
+            DarkstarEvent::Batch(events) => {
+                let mut rev_events = events.iter().map(|e| e.reverse()).collect::<Vec<_>>();
+                rev_events.reverse();
+                DarkstarEvent::Batch(rev_events)
+            }
+        }
+    }
+}
+
 pub struct ChangeHistory {
     undo_stack: Vec<DarkstarEvent>,
     redo_stack: Vec<DarkstarEvent>,
@@ -53,6 +67,11 @@ impl ChangeHistory {
     pub fn get_undo_stack(&self) -> &[DarkstarEvent] {
         &self.undo_stack
     }
+
+    pub fn get_redo_stack(&self) -> &[DarkstarEvent] {
+        &self.redo_stack
+    }
+
     pub fn clear(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();

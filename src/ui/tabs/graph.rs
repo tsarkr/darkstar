@@ -194,7 +194,20 @@ impl DarkstarApp {
                     if (node.pos - graph_pointer).length() < (30.0 / self.graph_scale) { self.dragging_node = Some(uri.clone()); break; }
                 }
             }
-            if response.clicked() {
+            if response.double_clicked() {
+                for (uri, node) in &self.nodes {
+                    if (node.pos - graph_pointer).length() < (30.0 / self.graph_scale) {
+                        if self.expanded_nodes.contains(uri) {
+                            self.expanded_nodes.remove(uri);
+                        } else {
+                            self.expanded_nodes.insert(uri.clone());
+                        }
+                        self.graph_needs_sync = true;
+                        self.simulation_alpha = 20.0;
+                        break;
+                    }
+                }
+            } else if response.clicked() {
                 for (uri, node) in &self.nodes {
                     if (node.pos - graph_pointer).length() < (30.0 / self.graph_scale) { 
                         self.selected_uri = Some(uri.clone()); 
@@ -336,6 +349,11 @@ impl DarkstarApp {
                  uri.to_lowercase().contains(&self.search_query.to_lowercase()));
             
             let radius = 20.0 * self.graph_scale;
+            let is_expanded = self.expanded_nodes.contains(uri);
+            if is_expanded {
+                painter.circle(pos, radius + 5.0 * self.graph_scale, egui::Color32::TRANSPARENT, egui::Stroke::new(1.5 * self.graph_scale, egui::Color32::from_rgb(100, 200, 255)));
+            }
+
             let stroke = egui::Stroke::new(
                 if matches_search { 4.0 } else if is_selected { 3.0 } else { 1.0 } * self.graph_scale, 
                 if matches_search { egui::Color32::from_rgb(255, 165, 0) } else if is_selected { egui::Color32::WHITE } else { egui::Color32::BLACK }

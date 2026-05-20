@@ -5,3 +5,4 @@ pub mod individuals;
 pub mod graph;
 pub mod entity_editor;
 pub mod source_editor;
+pub mod history;

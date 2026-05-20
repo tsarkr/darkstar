@@ -98,5 +98,7 @@ impl DarkstarPlugin for EntityStatsPlugin {
         }
     }
 
-    fn handle_event(&mut self, _event: &DarkstarEvent) {}
+    fn handle_event(&mut self, _event: &DarkstarEvent, manager: &mut DarkstarManager) {
+        self.refresh(manager);
+    }
 }

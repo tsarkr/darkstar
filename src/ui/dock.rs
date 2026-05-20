@@ -49,7 +49,7 @@ impl<'a> TabViewer for DarkstarTabViewer<'a> {
                 self.app.render_entity_editor_tab(ui);
             }
             DarkstarTab::History => {
-                ui.label("History Tab (TODO)");
+                self.app.render_history_tab(ui);
             }
             DarkstarTab::Plugin(name) => {
                 let i = self.app.i18n();

@@ -100,6 +100,14 @@ impl InferenceEngine {
 
     pub fn run_inference(&self, memory: &mut EngineMemory, rules_settings: &crate::core::settings::ReasonerRules) {
         let start_time = std::time::Instant::now();
+        
+        // Reset inferred graph, inconsistencies, and set main/delta graphs to copy of asserted graph
+        memory.inferred_graph = FastGraph::new();
+        memory.main_graph = memory.asserted_graph.clone();
+        memory.delta_graph = memory.asserted_graph.clone();
+        memory.is_consistent = true;
+        memory.inconsistencies.clear();
+
         println!("Darkstar Reasoner: Starting inference on {} triples...", memory.main_graph.triples().count());
         
         let mut iteration = 1;
