@@ -28,7 +28,8 @@ impl DarkstarApp {
         });
     }
 
-    pub fn render_class_hierarchy(&mut self, ui: &mut egui::Ui) {
+    pub fn rebuild_classes_cache(&mut self) {
+        if !self.classes_cache_dirty { return; }
         use sophia::api::term::matcher::Any;
         let rdfs_subclass_of = InferenceEngine::make_term("http://www.w3.org/2000/01/rdf-schema#subClassOf");
         let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
@@ -54,9 +55,23 @@ impl DarkstarApp {
 
         let mut roots: Vec<_> = all_classes.into_iter().filter(|c| !has_parent.contains(c)).collect();
         roots.sort();
+        
+        self.class_roots = roots;
+        self.class_children = children_map;
+        self.classes_cache_dirty = false;
+    }
+
+    pub fn render_class_hierarchy(&mut self, ui: &mut egui::Ui) {
+        self.rebuild_classes_cache();
+        
+        let roots = self.class_roots.clone();
+        let children_map = std::mem::take(&mut self.class_children);
+        
         for root in roots {
             self.render_hierarchy_node(ui, &root, &children_map);
         }
+        
+        self.class_children = children_map;
     }
 
     pub fn render_hierarchy_node(&mut self, ui: &mut egui::Ui, uri: &str, children_map: &HashMap<String, Vec<String>>) {

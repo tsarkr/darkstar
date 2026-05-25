@@ -77,6 +77,20 @@ pub struct DarkstarApp {
     
     pub show_plugin_manual: bool,
     pub plugin_manual_lang: Language,
+
+    // Caching for hierarchies & lists
+    pub classes_cache_dirty: bool,
+    pub class_roots: Vec<String>,
+    pub class_children: HashMap<String, Vec<String>>,
+    
+    pub properties_cache_dirty: bool,
+    pub object_prop_roots: Vec<String>,
+    pub object_prop_children: HashMap<String, Vec<String>>,
+    pub datatype_prop_roots: Vec<String>,
+    pub datatype_prop_children: HashMap<String, Vec<String>>,
+    
+    pub individuals_cache_dirty: bool,
+    pub individuals_by_type: HashMap<String, Vec<String>>,
 }
 
 impl DarkstarApp {
@@ -170,6 +184,17 @@ impl DarkstarApp {
             show_plugin_manual: false,
             plugin_manual_lang: settings.language,
             show_help: false,
+
+            classes_cache_dirty: true,
+            class_roots: Vec::new(),
+            class_children: HashMap::new(),
+            properties_cache_dirty: true,
+            object_prop_roots: Vec::new(),
+            object_prop_children: HashMap::new(),
+            datatype_prop_roots: Vec::new(),
+            datatype_prop_children: HashMap::new(),
+            individuals_cache_dirty: true,
+            individuals_by_type: HashMap::new(),
         };
         
         crate::plugins::load_all(&mut app.plugin_manager, &mut app.manager);
@@ -202,6 +227,12 @@ impl DarkstarApp {
                 self.manager.run_reasoning(&self.settings.enabled_rules);
                 self.graph_needs_sync = true;
             }
+        }
+
+        if self.graph_needs_sync {
+            self.classes_cache_dirty = true;
+            self.properties_cache_dirty = true;
+            self.individuals_cache_dirty = true;
         }
 
         self.render_plugin_guide(ctx);

@@ -182,16 +182,16 @@ impl DarkstarApp {
                     ui.add_space(10.0);
                     ui.separator();
                     ui.label(egui::RichText::new("Incoming Relations (as Object)").size(11.0).strong());
-                    for t in self.manager.memory.asserted_graph.triples().flatten().chain(self.manager.memory.inferred_graph.triples().flatten()) {
-                        if s_term == t.o() {
-                            let s = crate::rules::extract_str(&t.s());
-                            let p = crate::rules::extract_str(&t.p());
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(Self::get_label(&s)).size(11.0));
-                                ui.label(egui::RichText::new(format!("({})", Self::get_label(&p))).size(10.0).color(egui::Color32::GRAY));
-                                ui.label("➔ [Self]");
-                            });
-                        }
+                    for t in self.manager.memory.asserted_graph.triples_matching(Any, Any, Some(&s_term)).flatten().chain(
+                        self.manager.memory.inferred_graph.triples_matching(Any, Any, Some(&s_term)).flatten()
+                    ) {
+                        let s = crate::rules::extract_str(&t.s());
+                        let p = crate::rules::extract_str(&t.p());
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(Self::get_label(&s)).size(11.0));
+                            ui.label(egui::RichText::new(format!("({})", Self::get_label(&p))).size(10.0).color(egui::Color32::GRAY));
+                            ui.label("➔ [Self]");
+                        });
                     }
 
                     if let Some((s, p, o)) = to_delete {

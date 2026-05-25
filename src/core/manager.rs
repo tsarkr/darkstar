@@ -161,15 +161,10 @@ impl DarkstarManager {
         let mut changes = Vec::new();
         for t in temp_graph.triples() {
             let t = t?;
-            let s = crate::rules::extract_str(&t.s());
-            let p = crate::rules::extract_str(&t.p());
-            let o = crate::rules::extract_str(&t.o());
-            
-            let s_term = InferenceEngine::make_term(&s);
-            let p_term = InferenceEngine::make_term(&p);
-            let o_term = InferenceEngine::make_term(&o);
-            
-            if !self.memory.asserted_graph.contains(&s_term, &p_term, &o_term).unwrap() {
+            if !self.memory.asserted_graph.contains(t.s(), t.p(), t.o()).unwrap() {
+                let s = crate::rules::extract_str(&t.s());
+                let p = crate::rules::extract_str(&t.p());
+                let o = crate::rules::extract_str(&t.o());
                 changes.push(DarkstarEvent::AxiomAdded { s, p, o });
             }
         }
@@ -204,15 +199,10 @@ impl DarkstarManager {
         // Find newly added triples
         for t in temp_graph.triples() {
             let t = t?;
-            let s = crate::rules::extract_str(&t.s());
-            let p = crate::rules::extract_str(&t.p());
-            let o = crate::rules::extract_str(&t.o());
-            
-            let s_term = InferenceEngine::make_term(&s);
-            let p_term = InferenceEngine::make_term(&p);
-            let o_term = InferenceEngine::make_term(&o);
-            
-            if !self.memory.asserted_graph.contains(&s_term, &p_term, &o_term).unwrap() {
+            if !self.memory.asserted_graph.contains(t.s(), t.p(), t.o()).unwrap() {
+                let s = crate::rules::extract_str(&t.s());
+                let p = crate::rules::extract_str(&t.p());
+                let o = crate::rules::extract_str(&t.o());
                 changes.push(DarkstarEvent::AxiomAdded { s, p, o });
             }
         }
@@ -220,15 +210,10 @@ impl DarkstarManager {
         // Find removed triples
         let mut removed = Vec::new();
         for t in self.memory.asserted_graph.triples().flatten() {
-            let s = crate::rules::extract_str(&t.s());
-            let p = crate::rules::extract_str(&t.p());
-            let o = crate::rules::extract_str(&t.o());
-            
-            let s_term = InferenceEngine::make_term(&s);
-            let p_term = InferenceEngine::make_term(&p);
-            let o_term = InferenceEngine::make_term(&o);
-            
-            if !temp_graph.contains(&s_term, &p_term, &o_term).unwrap() {
+            if !temp_graph.contains(t.s(), t.p(), t.o()).unwrap() {
+                let s = crate::rules::extract_str(&t.s());
+                let p = crate::rules::extract_str(&t.p());
+                let o = crate::rules::extract_str(&t.o());
                 removed.push(DarkstarEvent::AxiomRemoved { s, p, o });
             }
         }
@@ -253,7 +238,28 @@ impl DarkstarManager {
         } else {
             crate::core::io::OntologyFormat::Turtle
         };
-        self.load_from_string(&data, format)?;
+        
+        match format {
+            crate::core::io::OntologyFormat::Turtle => {
+                let parser = sophia::turtle::parser::turtle::TurtleParser { base: None }.parse_str(&data);
+                self.memory.asserted_graph.insert_all(parser)?;
+            },
+            crate::core::io::OntologyFormat::NTriples => {
+                let parser = sophia::turtle::parser::nt::NTriplesParser {}.parse_str(&data);
+                self.memory.asserted_graph.insert_all(parser)?;
+            }
+        }
+
+        self.memory.main_graph = self.memory.asserted_graph.clone();
+        self.memory.delta_graph = self.memory.asserted_graph.clone();
+        self.is_dirty = false;
+        
+        self.history.clear();
+        self.event_queue.clear();
+        
+        let rules_settings = crate::core::settings::ReasonerRules::default();
+        self.engine.run_inference(&mut self.memory, &rules_settings);
+        
         self.active_file_path = Some(path.to_path_buf());
         self.needs_save = false;
         Ok(())

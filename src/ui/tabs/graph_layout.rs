@@ -11,27 +11,11 @@ impl DarkstarApp {
         let mut seen_nodes = HashSet::new();
         let mut node_types = HashMap::new();
 
-        let rdf_type = "i:http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         let owl_class = "i:http://www.w3.org/2002/07/owl#Class";
         let rdfs_class = "i:http://www.w3.org/2000/01/rdf-schema#Class";
         let owl_obj_prop = "i:http://www.w3.org/2002/07/owl#ObjectProperty";
         let owl_data_prop = "i:http://www.w3.org/2002/07/owl#DatatypeProperty";
         let owl_individual = "i:http://www.w3.org/2002/07/owl#NamedIndividual";
-
-        for t in self.manager.memory.main_graph.triples().flatten() {
-            let s = crate::rules::extract_str(&t.s());
-            let p = crate::rules::extract_str(&t.p());
-            let o = crate::rules::extract_str(&t.o());
-
-            if s.starts_with("_:") { node_types.entry(s.clone()).or_insert(NodeType::Blank); }
-            if o.starts_with("_:") { node_types.entry(o.clone()).or_insert(NodeType::Blank); }
-
-            if p == rdf_type {
-                if o == owl_class || o == rdfs_class { node_types.insert(s, NodeType::Class); }
-                else if o == owl_obj_prop || o == owl_data_prop { node_types.insert(s, NodeType::Property); }
-                else if o == owl_individual { node_types.insert(s, NodeType::Individual); }
-            }
-        }
 
         let mut visible_in_focus = HashSet::new();
         if self.filters.focus_mode {
@@ -47,13 +31,58 @@ impl DarkstarApp {
                 if d >= self.filters.expansion_depth { continue; }
 
                 let graphs = [&self.manager.memory.asserted_graph, &self.manager.memory.inferred_graph];
+                let u_term = crate::rules::engine::InferenceEngine::make_term(&u);
                 for g in graphs {
-                    for t in g.triples().flatten() {
-                        let s = crate::rules::extract_str(&t.s());
+                    // Outgoing edges
+                    for t in g.triples_matching(Some(&u_term), sophia::api::term::matcher::Any, sophia::api::term::matcher::Any).flatten() {
                         let o = crate::rules::extract_str(&t.o());
-                        if s == u { queue.push_back((o, d + 1)); }
-                        else if o == u { queue.push_back((s, d + 1)); }
+                        queue.push_back((o, d + 1));
                     }
+                    // Incoming edges
+                    for t in g.triples_matching(sophia::api::term::matcher::Any, sophia::api::term::matcher::Any, Some(&u_term)).flatten() {
+                        let s = crate::rules::extract_str(&t.s());
+                        queue.push_back((s, d + 1));
+                    }
+                }
+            }
+        }
+
+        // Build node types on-demand for visible nodes (or a capped sample of nodes if focus_mode is disabled)
+        let nodes_for_typing: HashSet<String> = if self.filters.focus_mode {
+            visible_in_focus.clone()
+        } else {
+            let mut sample_nodes = HashSet::new();
+            let mut count = 0;
+            for t in self.manager.memory.asserted_graph.triples().flatten() {
+                if count >= 1000 { break; }
+                sample_nodes.insert(crate::rules::extract_str(&t.s()));
+                sample_nodes.insert(crate::rules::extract_str(&t.o()));
+                count += 1;
+            }
+            sample_nodes
+        };
+
+        for uri in &nodes_for_typing {
+            if uri.starts_with("_:") {
+                node_types.insert(uri.clone(), NodeType::Blank);
+                continue;
+            }
+            if uri.starts_with("l:") {
+                node_types.insert(uri.clone(), NodeType::Literal);
+                continue;
+            }
+
+            let uri_term = crate::rules::engine::InferenceEngine::make_term(uri);
+            let rdf_type_term = crate::rules::engine::InferenceEngine::make_term("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+            let type_triples = self.manager.memory.main_graph.triples_matching(Some(&uri_term), Some(&rdf_type_term), sophia::api::term::matcher::Any);
+            for t in type_triples.flatten() {
+                let o = crate::rules::extract_str(&t.o());
+                if o == owl_class || o == rdfs_class {
+                    node_types.insert(uri.clone(), NodeType::Class);
+                } else if o == owl_obj_prop || o == owl_data_prop {
+                    node_types.insert(uri.clone(), NodeType::Property);
+                } else if o == owl_individual {
+                    node_types.insert(uri.clone(), NodeType::Individual);
                 }
             }
         }
@@ -71,56 +100,93 @@ impl DarkstarApp {
 
         let mut seen_triples = HashSet::new();
         
-        for t in self.manager.memory.asserted_graph.triples().flatten() {
-            let s = crate::rules::extract_str(&t.s());
-            let p = crate::rules::extract_str(&t.p());
-            let o = crate::rules::extract_str(&t.o());
-            let is_o_literal = t.o().lexical_form().is_some() && t.o().iri().is_none();
-            
-            let key = (s.clone(), p.clone(), o.clone());
-            if seen_triples.contains(&key) { continue; }
-            seen_triples.insert(key);
+        if self.filters.focus_mode {
+            let graphs = [&self.manager.memory.asserted_graph, &self.manager.memory.inferred_graph];
+            for &g in &graphs {
+                let is_inferred = std::ptr::eq(g, &self.manager.memory.inferred_graph);
+                for u in &visible_in_focus {
+                    let u_term = crate::rules::engine::InferenceEngine::make_term(u);
+                    for t in g.triples_matching(Some(&u_term), sophia::api::term::matcher::Any, sophia::api::term::matcher::Any).flatten() {
+                        let s = u.clone();
+                        let p = crate::rules::extract_str(&t.p());
+                        let o = crate::rules::extract_str(&t.o());
+                        let is_o_literal = t.o().lexical_form().is_some() && t.o().iri().is_none();
+                        
+                        if !visible_in_focus.contains(&o) { continue; }
+                        
+                        let key = (s.clone(), p.clone(), o.clone());
+                        if seen_triples.contains(&key) { continue; }
+                        seen_triples.insert(key);
 
-            if self.filters.focus_mode && (!visible_in_focus.contains(&s) || !visible_in_focus.contains(&o)) { continue; }
+                        let s_type = *node_types.get(&s).unwrap_or(&NodeType::Individual);
+                        let o_type = if is_o_literal { NodeType::Literal } else { *node_types.get(&o).unwrap_or(&NodeType::Individual) };
 
-            let s_type = *node_types.get(&s).unwrap_or(&NodeType::Individual);
-            let o_type = if is_o_literal { NodeType::Literal } else { *node_types.get(&o).unwrap_or(&NodeType::Individual) };
+                        if !self.filters.show_literals && o_type == NodeType::Literal { continue; }
+                        if !self.filters.show_schema && (s_type == NodeType::Class || o_type == NodeType::Class || s_type == NodeType::Property) { continue; }
+                        if !self.filters.show_individuals && (s_type == NodeType::Individual || o_type == NodeType::Individual) { continue; }
+                        if !self.filters.show_system && is_system(&p) { continue; }
 
-            if !self.filters.show_literals && o_type == NodeType::Literal { continue; }
-            if !self.filters.show_schema && (s_type == NodeType::Class || o_type == NodeType::Class || s_type == NodeType::Property) { continue; }
-            if !self.filters.show_individuals && (s_type == NodeType::Individual || o_type == NodeType::Individual) { continue; }
-            if !self.filters.show_system && is_system(&p) { continue; }
+                        seen_nodes.insert(s.clone());
+                        seen_nodes.insert(o.clone());
+                        new_edges.push(GraphEdge { from: s, to: o, label: Self::get_label(&p), is_inferred });
+                    }
+                }
+            }
+        } else {
+            let max_edges = 500;
+            let mut edge_count = 0;
 
-            seen_nodes.insert(s.clone());
-            seen_nodes.insert(o.clone());
-            new_edges.push(GraphEdge { from: s, to: o, label: Self::get_label(&p), is_inferred: false });
-        }
+            for t in self.manager.memory.asserted_graph.triples().flatten() {
+                if edge_count >= max_edges { break; }
+                let s = crate::rules::extract_str(&t.s());
+                let p = crate::rules::extract_str(&t.p());
+                let o = crate::rules::extract_str(&t.o());
+                let is_o_literal = t.o().lexical_form().is_some() && t.o().iri().is_none();
+                
+                let key = (s.clone(), p.clone(), o.clone());
+                if seen_triples.contains(&key) { continue; }
+                seen_triples.insert(key);
 
-        if self.filters.show_inferred {
-            for t in self.manager.memory.inferred_graph.triples().flatten() {
-                if !self.manager.memory.asserted_graph.contains(t.s(), t.p(), t.o()).unwrap() {
-                    let s = crate::rules::extract_str(&t.s());
-                    let p = crate::rules::extract_str(&t.p());
-                    let o = crate::rules::extract_str(&t.o());
-                    let is_o_literal = t.o().lexical_form().is_some() && t.o().iri().is_none();
+                let s_type = *node_types.get(&s).unwrap_or(&NodeType::Individual);
+                let o_type = if is_o_literal { NodeType::Literal } else { *node_types.get(&o).unwrap_or(&NodeType::Individual) };
 
-                    let key = (s.clone(), p.clone(), o.clone());
-                    if seen_triples.contains(&key) { continue; }
-                    seen_triples.insert(key);
+                if !self.filters.show_literals && o_type == NodeType::Literal { continue; }
+                if !self.filters.show_schema && (s_type == NodeType::Class || o_type == NodeType::Class || s_type == NodeType::Property) { continue; }
+                if !self.filters.show_individuals && (s_type == NodeType::Individual || o_type == NodeType::Individual) { continue; }
+                if !self.filters.show_system && is_system(&p) { continue; }
 
-                    if self.filters.focus_mode && (!visible_in_focus.contains(&s) || !visible_in_focus.contains(&o)) { continue; }
+                seen_nodes.insert(s.clone());
+                seen_nodes.insert(o.clone());
+                new_edges.push(GraphEdge { from: s, to: o, label: Self::get_label(&p), is_inferred: false });
+                edge_count += 1;
+            }
 
-                    let s_type = *node_types.get(&s).unwrap_or(&NodeType::Individual);
-                    let o_type = if is_o_literal { NodeType::Literal } else { *node_types.get(&o).unwrap_or(&NodeType::Individual) };
+            if self.filters.show_inferred {
+                for t in self.manager.memory.inferred_graph.triples().flatten() {
+                    if edge_count >= max_edges { break; }
+                    if !self.manager.memory.asserted_graph.contains(t.s(), t.p(), t.o()).unwrap() {
+                        let s = crate::rules::extract_str(&t.s());
+                        let p = crate::rules::extract_str(&t.p());
+                        let o = crate::rules::extract_str(&t.o());
+                        let is_o_literal = t.o().lexical_form().is_some() && t.o().iri().is_none();
 
-                    if !self.filters.show_literals && o_type == NodeType::Literal { continue; }
-                    if !self.filters.show_schema && (s_type == NodeType::Class || o_type == NodeType::Class || s_type == NodeType::Property) { continue; }
-                    if !self.filters.show_individuals && (s_type == NodeType::Individual || o_type == NodeType::Individual) { continue; }
-                    if !self.filters.show_system && is_system(&p) { continue; }
+                        let key = (s.clone(), p.clone(), o.clone());
+                        if seen_triples.contains(&key) { continue; }
+                        seen_triples.insert(key);
 
-                    seen_nodes.insert(s.clone());
-                    seen_nodes.insert(o.clone());
-                    new_edges.push(GraphEdge { from: s, to: o, label: Self::get_label(&p), is_inferred: true });
+                        let s_type = *node_types.get(&s).unwrap_or(&NodeType::Individual);
+                        let o_type = if is_o_literal { NodeType::Literal } else { *node_types.get(&o).unwrap_or(&NodeType::Individual) };
+
+                        if !self.filters.show_literals && o_type == NodeType::Literal { continue; }
+                        if !self.filters.show_schema && (s_type == NodeType::Class || o_type == NodeType::Class || s_type == NodeType::Property) { continue; }
+                        if !self.filters.show_individuals && (s_type == NodeType::Individual || o_type == NodeType::Individual) { continue; }
+                        if !self.filters.show_system && is_system(&p) { continue; }
+
+                        seen_nodes.insert(s.clone());
+                        seen_nodes.insert(o.clone());
+                        new_edges.push(GraphEdge { from: s, to: o, label: Self::get_label(&p), is_inferred: true });
+                        edge_count += 1;
+                    }
                 }
             }
         }

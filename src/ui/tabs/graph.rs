@@ -82,6 +82,56 @@ impl DarkstarApp {
             if self.graph_needs_sync {
                 self.sync_graph();
             }
+            
+            if self.nodes.len() > 120 {
+                let mut frame = egui::Frame::group(ui.style());
+                frame.fill = if self.settings.theme_dark { egui::Color32::from_rgb(45, 35, 15) } else { egui::Color32::from_rgb(255, 245, 220) };
+                frame.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(230, 140, 0));
+                frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("⚠️").size(14.0));
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(format!(
+                                "그래프 개체 수(현재 {}개)가 많아 로딩 및 연산 속도가 느려질 수 있습니다. 개체 수를 줄이기 위한 아래 설정을 제안합니다:",
+                                self.nodes.len()
+                            )).size(11.0).strong());
+                            
+                            ui.horizontal(|ui| {
+                                if !self.filters.focus_mode {
+                                    if ui.button("🎯 포커스 모드 활성화").on_hover_text("선택한 개체 주변만 집중 탐색하여 렌더링할 개체 수를 크게 줄입니다.").clicked() {
+                                        self.filters.focus_mode = true;
+                                        self.graph_needs_sync = true;
+                                        self.simulation_alpha = 20.0;
+                                    }
+                                } else if self.filters.expansion_depth > 1 {
+                                    if ui.button("🔍 탐색 깊이 축소 (1단계)").on_hover_text("탐색 반경을 1단계로 줄여 주변 개체 수를 최소화합니다.").clicked() {
+                                        self.filters.expansion_depth = 1;
+                                        self.graph_needs_sync = true;
+                                        self.simulation_alpha = 20.0;
+                                    }
+                                }
+                                
+                                if self.filters.show_schema {
+                                    if ui.button("🏢 클래스/프로퍼티 숨기기").on_hover_text("클래스와 프로퍼티 노드를 숨기고 개별 인디비주얼만 표시합니다.").clicked() {
+                                        self.filters.show_schema = false;
+                                        self.graph_needs_sync = true;
+                                        self.simulation_alpha = 20.0;
+                                    }
+                                }
+                                
+                                if self.filters.show_individuals && self.nodes.values().any(|n| n.node_type == NodeType::Individual) {
+                                    if ui.button("👥 인디비주얼 숨기기").on_hover_text("개별 인스턴스(인디비주얼) 노드를 숨기고 스키마 중심 구조만 표시합니다.").clicked() {
+                                        self.filters.show_individuals = false;
+                                        self.graph_needs_sync = true;
+                                        self.simulation_alpha = 20.0;
+                                    }
+                                }
+                            });
+                        });
+                    });
+                });
+            }
+
             self.render_custom_graph(ui);
         }
     }
@@ -132,58 +182,81 @@ impl DarkstarApp {
         }
 
         // Physics Update (Force-Directed)
-        if self.filters.layout_mode == LayoutMode::ForceDirected {
-            let mut forces: HashMap<String, Vec2> = HashMap::new();
-            let keys: Vec<String> = self.nodes.keys().cloned().collect();
+        if self.filters.layout_mode == LayoutMode::ForceDirected && self.simulation_alpha > 0.01 {
+            let mut keys: Vec<String> = Vec::with_capacity(self.nodes.len());
+            let mut positions: Vec<Vec2> = Vec::with_capacity(self.nodes.len());
+            let mut velocities: Vec<Vec2> = Vec::with_capacity(self.nodes.len());
+            let mut forces: Vec<Vec2> = vec![Vec2::ZERO; self.nodes.len()];
+            
+            // Map string key to index in the vectors
+            let mut key_to_idx: HashMap<String, usize> = HashMap::with_capacity(self.nodes.len());
+            
+            for (idx, (key, node)) in self.nodes.iter().enumerate() {
+                keys.push(key.clone());
+                positions.push(node.pos);
+                velocities.push(node.vel);
+                key_to_idx.insert(key.clone(), idx);
+            }
 
-            for i in 0..keys.len() {
-                for j in i+1..keys.len() {
-                    let u = &keys[i];
-                    let v = &keys[j];
-                    let diff = self.nodes[u].pos - self.nodes[v].pos;
+            let len = keys.len();
+            for i in 0..len {
+                for j in i+1..len {
+                    let diff = positions[i] - positions[j];
                     let dist_sq = diff.length_sq().max(1000.0);
-                    let force = diff.normalized() * (75000.0 * self.filters.spacing_multiplier / dist_sq) * self.simulation_alpha.max(1.0);
-                    *forces.entry(u.clone()).or_default() += force;
-                    *forces.entry(v.clone()).or_default() -= force;
+                    let dist = dist_sq.sqrt();
+                    let force_mag = (75000.0 * self.filters.spacing_multiplier * self.simulation_alpha) / (dist_sq * dist);
+                    let force = diff * force_mag;
+                    forces[i] += force;
+                    forces[j] -= force;
                 }
             }
 
             let mut center = Vec2::ZERO;
-            if !self.nodes.is_empty() {
-                for node in self.nodes.values() { center += node.pos; }
-                center /= self.nodes.len() as f32;
+            if !positions.is_empty() {
+                for pos in &positions { center += *pos; }
+                center /= positions.len() as f32;
             }
 
-            for (uri, node) in &self.nodes {
-                let diff = center - node.pos;
-                let dist = diff.length().max(1.0);
-                let gravity = diff.normalized() * (dist * 0.15); 
-                *forces.entry(uri.clone()).or_default() += gravity;
+            for i in 0..len {
+                let diff = center - positions[i];
+                let gravity = diff * 0.15; 
+                forces[i] += gravity;
             }
 
             for edge in &self.edges {
-                if let (Some(n1), Some(n2)) = (self.nodes.get(&edge.from), self.nodes.get(&edge.to)) {
-                    let diff = n1.pos - n2.pos;
+                if let (Some(&idx1), Some(&idx2)) = (key_to_idx.get(&edge.from), key_to_idx.get(&edge.to)) {
+                    let diff = positions[idx1] - positions[idx2];
                     let dist = diff.length().max(1.0);
-                    let force = diff.normalized() * (dist - 250.0 * self.filters.spacing_multiplier) * -0.25 * self.simulation_alpha.max(1.0).sqrt();
-                    *forces.entry(edge.from.clone()).or_default() += force;
-                    *forces.entry(edge.to.clone()).or_default() -= force;
+                    let force_mag = (dist - 250.0 * self.filters.spacing_multiplier) * -0.25 * self.simulation_alpha.sqrt() / dist;
+                    let force = diff * force_mag;
+                    forces[idx1] += force;
+                    forces[idx2] -= force;
                 }
             }
 
-            for (uri, node) in &mut self.nodes {
-                node.vel += *forces.get(uri).unwrap_or(&Vec2::ZERO);
-                node.vel *= 0.6;
-                if self.dragging_node.as_ref() != Some(uri) { node.pos += node.vel * 0.1; }
+            for i in 0..len {
+                let key = &keys[i];
+                let mut vel = velocities[i] + forces[i];
+                vel *= 0.6;
+                let mut pos = positions[i];
+                if self.dragging_node.as_ref() != Some(key) {
+                    pos += vel * 0.1;
+                }
+                
+                if let Some(node) = self.nodes.get_mut(key) {
+                    node.vel = vel;
+                    node.pos = pos;
+                }
             }
 
-            if self.simulation_alpha > 1.0 {
-                self.simulation_alpha *= 0.95;
-                ui.ctx().request_repaint();
-            } else { self.simulation_alpha = 1.0; }
-            
-            let total_vel: f32 = self.nodes.values().map(|n| n.vel.length()).sum();
-            if total_vel > 0.1 { ui.ctx().request_repaint(); }
+            self.simulation_alpha *= 0.95;
+            ui.ctx().request_repaint();
+        } else if self.filters.layout_mode == LayoutMode::ForceDirected && self.simulation_alpha > 0.0 {
+            // Cool down complete, stop repaint
+            self.simulation_alpha = 0.0;
+            for node in self.nodes.values_mut() {
+                node.vel = Vec2::ZERO;
+            }
         }
 
         // Interaction
@@ -220,7 +293,11 @@ impl DarkstarApp {
         if let Some(uri) = &self.dragging_node {
             if let Some(pointer_pos) = response.interact_pointer_pos() {
                 let graph_pointer = (pointer_pos - rect.min - self.graph_offset) / self.graph_scale;
-                if let Some(node) = self.nodes.get_mut(uri) { node.pos = graph_pointer; }
+                if let Some(node) = self.nodes.get_mut(uri) { 
+                    node.pos = graph_pointer; 
+                    self.simulation_alpha = self.simulation_alpha.max(5.0);
+                    ui.ctx().request_repaint();
+                }
             }
         }
 

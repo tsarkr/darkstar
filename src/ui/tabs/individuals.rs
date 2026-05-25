@@ -25,7 +25,8 @@ impl DarkstarApp {
         });
     }
 
-    pub fn render_individuals_list(&mut self, ui: &mut egui::Ui) {
+    pub fn rebuild_individuals_cache(&mut self) {
+        if !self.individuals_cache_dirty { return; }
         use sophia::api::term::matcher::Any;
         let rdf_type = InferenceEngine::make_term("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
         let mut individuals_by_type: HashMap<String, Vec<String>> = HashMap::new();
@@ -52,6 +53,15 @@ impl DarkstarApp {
         for (s, o) in candidates {
             if !known_meta.contains(&s) { individuals_by_type.entry(o).or_default().push(s); }
         }
+
+        self.individuals_by_type = individuals_by_type;
+        self.individuals_cache_dirty = false;
+    }
+
+    pub fn render_individuals_list(&mut self, ui: &mut egui::Ui) {
+        self.rebuild_individuals_cache();
+        
+        let individuals_by_type = std::mem::take(&mut self.individuals_by_type);
 
         let mut types: Vec<_> = individuals_by_type.keys().cloned().collect();
         types.sort();
@@ -92,5 +102,7 @@ impl DarkstarApp {
                     }
                 });
         }
+        
+        self.individuals_by_type = individuals_by_type;
     }
 }
