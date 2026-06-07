@@ -199,48 +199,65 @@ impl DarkstarApp {
             }
 
             let len = keys.len();
+            // 1. Repulsive forces (Coulomb-like repulsion)
             for i in 0..len {
                 for j in i+1..len {
                     let diff = positions[i] - positions[j];
-                    let dist_sq = diff.length_sq().max(1000.0);
-                    let dist = dist_sq.sqrt();
-                    let force_mag = (75000.0 * self.filters.spacing_multiplier * self.simulation_alpha) / (dist_sq * dist);
+                    let dist = diff.length().max(20.0); // Prevent division by zero and extreme forces
+                    let dist_sq = dist * dist;
+                    let k_r = 150000.0 * self.filters.spacing_multiplier.powf(1.5);
+                    let force_mag = k_r / (dist_sq * dist); // multiplied by diff gives k_r / dist_sq magnitude
                     let force = diff * force_mag;
                     forces[i] += force;
                     forces[j] -= force;
                 }
             }
 
+            // 2. Centering Gravity forces (pulls all nodes towards the center of gravity)
             let mut center = Vec2::ZERO;
             if !positions.is_empty() {
                 for pos in &positions { center += *pos; }
                 center /= positions.len() as f32;
             }
-
+            let k_g = 0.015;
             for i in 0..len {
                 let diff = center - positions[i];
-                let gravity = diff * 0.15; 
+                let gravity = diff * k_g;
                 forces[i] += gravity;
             }
 
+            // 3. Attractive forces (Hooke's Law springs along edges)
+            let rest_len = 220.0 * self.filters.spacing_multiplier;
+            let k_a = 0.12;
             for edge in &self.edges {
                 if let (Some(&idx1), Some(&idx2)) = (key_to_idx.get(&edge.from), key_to_idx.get(&edge.to)) {
                     let diff = positions[idx1] - positions[idx2];
                     let dist = diff.length().max(1.0);
-                    let force_mag = (dist - 250.0 * self.filters.spacing_multiplier) * -0.25 * self.simulation_alpha.sqrt() / dist;
+                    // Hooke's Law spring force: magnitude is k_a * (dist - rest_len)
+                    let force_mag = -k_a * (dist - rest_len) / dist; // multiplied by diff gives -k_a * (dist - rest_len) * (diff / dist)
                     let force = diff * force_mag;
                     forces[idx1] += force;
                     forces[idx2] -= force;
                 }
             }
 
+            // 4. Update velocity and position with cooling factor
             for i in 0..len {
                 let key = &keys[i];
-                let mut vel = velocities[i] + forces[i];
-                vel *= 0.6;
+                // Apply force scaled by simulation_alpha to velocity
+                let force = forces[i] * self.simulation_alpha * 0.05;
+                let mut vel = (velocities[i] + force) * 0.7; // Damping
+                
+                // Limit maximum displacement to prevent instability when alpha is high
+                let max_displacement = 50.0;
+                let vel_len = vel.length();
+                if vel_len > max_displacement {
+                    vel = vel * (max_displacement / vel_len);
+                }
+
                 let mut pos = positions[i];
                 if self.dragging_node.as_ref() != Some(key) {
-                    pos += vel * 0.1;
+                    pos += vel;
                 }
                 
                 if let Some(node) = self.nodes.get_mut(key) {

@@ -1,0 +1,95 @@
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ds: <http://darkstar.io/schema#> .
+@prefix hist: <http://darkstar.io/history/1919#> .
+
+ds:Ontology a owl:Ontology ;
+    rdfs:label "Darkstar Rigorous OWL 2 RL Benchmark - Fixed Verification" .
+
+# ==========================================
+# 1. T-Box (Schema Definition)
+# ==========================================
+
+# Core Whitelisted Classes for Graph Visualization
+ds:Person a owl:Class ;
+    rdfs:label "Person" .
+
+ds:Organization a owl:Class ;
+    rdfs:label "Organization" .
+
+# Sub-classes for Digital Humanities Taxonomy
+ds:Laborer a owl:Class ;
+    rdfs:subClassOf ds:Person ;
+    rdfs:label "Laborer" .
+
+ds:Activist a owl:Class ;
+    rdfs:subClassOf ds:Person ;
+    rdfs:label "Independence Activist" .
+
+# Complex Class Expression: Intersection
+ds:PatriotWorker a owl:Class ;
+    rdfs:subClassOf ds:Person ;
+    owl:intersectionOf ( ds:Laborer ds:Activist ) ;
+    rdfs:label "Patriot Worker" .
+
+# Object Properties & Logical Inverses
+ds:worksAt a owl:ObjectProperty ;
+    rdfs:domain ds:Person ;
+    rdfs:range ds:Organization .
+
+ds:employs a owl:ObjectProperty ;
+    owl:inverseOf ds:worksAt ;
+    rdfs:domain ds:Organization ;
+    rdfs:range ds:Person .
+
+# Property Chain: [worksAt] -> [employs] = [hasColleague]
+ds:hasColleague a owl:ObjectProperty ;
+    owl:propertyChainAxiom ( ds:worksAt ds:employs ) ;
+    rdfs:domain ds:Person ;
+    rdfs:range ds:Person .
+
+# Datatype Properties
+ds:residentId a owl:DatatypeProperty ;
+    rdfs:domain ds:Person ;
+    rdfs:range xsd:string .
+
+ds:age a owl:DatatypeProperty ;
+    rdfs:domain ds:Person ;
+    rdfs:range xsd:integer .
+
+# Identity Key Constraints
+ds:Person owl:hasKey ( ds:residentId ) .
+
+
+# ==========================================
+# 2. A-Box (Validated Historical Instances)
+# ==========================================
+
+### Source Document 1: Imperial Employment Ledger
+hist:Jongno_Rickshaw_Co a ds:Organization ;
+    rdfs:label "Jongno Rickshaw Company" .
+
+hist:Subject_Kim a ds:Person ;
+    rdfs:label "Subject Kim" ;
+    ds:residentId "1919-003A" ;
+    ds:age "0026"^^xsd:integer ;
+    ds:worksAt hist:Jongno_Rickshaw_Co .
+
+hist:Subject_Lee a ds:Person ;
+    rdfs:label "Subject Lee" ;
+    ds:worksAt hist:Jongno_Rickshaw_Co .
+
+
+### Source Document 2: Kyungsung Court Interrogation Record
+# Explicitly declared as ds:Person alongside sub-classes to force frontend rendering
+hist:Alias_Gim a ds:Person, ds:Laborer, ds:Activist ;
+    rdfs:label "Alias Gim (Rickshaw-man)" ;
+    ds:residentId "1919-003A" ; # Triggers owl:sameAs with Subject_Kim
+    ds:age "26"^^xsd:integer .
+
+
+### Source Document 3: Secret Underground Network Archives
+# Complementary edge reinforcing the inverse property chain
+hist:Jongno_Rickshaw_Co ds:employs hist:Subject_Lee .
