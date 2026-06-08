@@ -216,11 +216,26 @@ impl DarkstarApp {
         self.edges = new_edges;
 
         match self.filters.layout_mode {
-            LayoutMode::Hierarchical => self.apply_hierarchical_layout(),
-            LayoutMode::Radial => self.apply_radial_layout(),
-            LayoutMode::Grid => self.apply_grid_layout(),
-            LayoutMode::Circular => self.apply_circular_layout(),
-            LayoutMode::Concentric => self.apply_concentric_layout(),
+            LayoutMode::Hierarchical => {
+                self.apply_hierarchical_layout();
+                self.resolve_collisions(50);
+            }
+            LayoutMode::Radial => {
+                self.apply_radial_layout();
+                self.resolve_collisions(50);
+            }
+            LayoutMode::Grid => {
+                self.apply_grid_layout();
+                self.resolve_collisions(50);
+            }
+            LayoutMode::Circular => {
+                self.apply_circular_layout();
+                self.resolve_collisions(50);
+            }
+            LayoutMode::Concentric => {
+                self.apply_concentric_layout();
+                self.resolve_collisions(50);
+            }
             LayoutMode::ForceDirected => {},
         }
         self.graph_needs_sync = false;
@@ -334,4 +349,104 @@ impl DarkstarApp {
             }
         }
     }
+
+    pub fn resolve_collisions(&mut self, iterations: usize) {
+        if self.nodes.is_empty() { return; }
+        
+        let mut keys: Vec<String> = Vec::with_capacity(self.nodes.len());
+        let mut widths: Vec<f32> = Vec::with_capacity(self.nodes.len());
+        let mut heights: Vec<f32> = Vec::with_capacity(self.nodes.len());
+        
+        for (key, node) in &self.nodes {
+            keys.push(key.clone());
+            
+            // Base radius/bounds for the node shape
+            let (base_w, base_h): (f32, f32) = match node.node_type {
+                NodeType::Class => (20.0, 20.0),
+                NodeType::Property => (30.0, 15.0),
+                NodeType::Individual => (20.0, 20.0),
+                NodeType::Literal => (25.0, 12.0),
+                NodeType::Blank => (20.0, 20.0),
+            };
+            
+            // Calculate label width. Average character width is around 6.0 pixels.
+            let label_len = node.label.chars().count() as f32;
+            let label_width = label_len * 6.0;
+            
+            // Dynamic width: max of base width and label width with some horizontal padding
+            let half_w = base_w.max(label_width * 0.5) + 12.0;
+            
+            // Dynamic height: base height + space for label + vertical padding
+            let half_h = base_h + 15.0;
+            
+            widths.push(half_w);
+            heights.push(half_h);
+        }
+        
+        let len = keys.len();
+        
+        let mut positions: Vec<Vec2> = keys.iter().map(|k| self.nodes[k].pos).collect();
+        
+        for _ in 0..iterations {
+            let mut moved = false;
+            
+            for i in 0..len {
+                for j in i+1..len {
+                    let diff = positions[i] - positions[j];
+                    let combined_w = widths[i] + widths[j];
+                    let combined_h = heights[i] + heights[j];
+                    
+                    let dx = diff.x;
+                    let dy = diff.y;
+                    
+                    // Elliptic distance ratio: if < 1.0, they overlap
+                    let dx_ratio = dx / combined_w;
+                    let dy_ratio = dy / combined_h;
+                    let d_sq = dx_ratio * dx_ratio + dy_ratio * dy_ratio;
+                    
+                    if d_sq < 0.9999 {
+                        moved = true;
+                        let d = d_sq.sqrt();
+                        
+                        let push = if d > 0.0001 {
+                            let push_factor = (1.0 - d) / d;
+                            diff * push_factor * 0.85
+                        } else {
+                            // If exactly on top of each other, nudge them slightly in a deterministic direction
+                            Vec2::new(1.0, 0.1) * (combined_w * 0.5)
+                        };
+                        
+                        let is_i_dragged = self.dragging_node.as_ref() == Some(&keys[i]);
+                        let is_j_dragged = self.dragging_node.as_ref() == Some(&keys[j]);
+                        
+                        match (is_i_dragged, is_j_dragged) {
+                            (true, true) => {}
+                            (true, false) => {
+                                positions[j] -= push;
+                            }
+                            (false, true) => {
+                                positions[i] += push;
+                            }
+                            (false, false) => {
+                                positions[i] += push * 0.5;
+                                positions[j] -= push * 0.5;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if !moved {
+                break;
+            }
+        }
+
+        // Write back positions
+        for i in 0..len {
+            if let Some(node) = self.nodes.get_mut(&keys[i]) {
+                node.pos = positions[i];
+            }
+        }
+    }
 }
+

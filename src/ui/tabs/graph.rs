@@ -266,6 +266,8 @@ impl DarkstarApp {
                 }
             }
 
+            self.resolve_collisions(2);
+
             self.simulation_alpha *= 0.95;
             ui.ctx().request_repaint();
         } else if self.filters.layout_mode == LayoutMode::ForceDirected && self.simulation_alpha > 0.0 {
