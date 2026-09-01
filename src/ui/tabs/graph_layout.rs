@@ -195,7 +195,7 @@ impl DarkstarApp {
         for uri in &seen_nodes {
             if !self.nodes.contains_key(uri) {
                 let angle = new_node_count as f32 * 137.5 * std::f32::consts::PI / 180.0;
-                let radius = (new_node_count as f32).sqrt() * 50.0;
+                let radius = (new_node_count as f32).sqrt() * 25.0;
                 self.nodes.insert(uri.clone(), GraphNode {
                     pos: Vec2::new(400.0 + angle.cos() * radius, 300.0 + angle.sin() * radius),
                     vel: Vec2::ZERO,
@@ -257,7 +257,7 @@ impl DarkstarApp {
         let mut layer_counts = HashMap::new();
         for (uri, layer) in layers {
             let count = layer_counts.entry(layer).or_insert(0);
-            if let Some(node) = self.nodes.get_mut(&uri) { node.pos = Vec2::new(*count as f32 * 180.0 + 50.0, layer as f32 * 150.0 + 50.0); }
+            if let Some(node) = self.nodes.get_mut(&uri) { node.pos = Vec2::new(*count as f32 * 85.0 + 40.0, layer as f32 * 75.0 + 40.0); }
             *count += 1;
         }
     }
@@ -283,8 +283,8 @@ impl DarkstarApp {
             for (i, uri) in nodes.into_iter().enumerate() {
                 if let Some(node) = self.nodes.get_mut(&uri) {
                     let angle = (i as f32 / count as f32) * std::f32::consts::TAU;
-                    let r = d as f32 * 220.0;
-                    node.pos = Vec2::new(r * angle.cos() + 500.0, r * angle.sin() + 500.0);
+                    let r = d as f32 * 95.0;
+                    node.pos = Vec2::new(r * angle.cos() + 400.0, r * angle.sin() + 300.0);
                 }
             }
         }
@@ -294,7 +294,7 @@ impl DarkstarApp {
         if self.nodes.is_empty() { return; }
         let count = self.nodes.len();
         let cols = (count as f32).sqrt().ceil() as usize;
-        let spacing = 180.0;
+        let spacing = 75.0;
         let mut i = 0;
         let mut sorted_uris: Vec<_> = self.nodes.keys().cloned().collect();
         sorted_uris.sort();
@@ -302,7 +302,7 @@ impl DarkstarApp {
             if let Some(node) = self.nodes.get_mut(&uri) {
                 let row = i / cols;
                 let col = i % cols;
-                node.pos = Vec2::new(col as f32 * spacing + 100.0, row as f32 * spacing + 100.0);
+                node.pos = Vec2::new(col as f32 * spacing + 50.0, row as f32 * spacing + 50.0);
                 i += 1;
             }
         }
@@ -311,13 +311,13 @@ impl DarkstarApp {
     pub fn apply_circular_layout(&mut self) {
         if self.nodes.is_empty() { return; }
         let count = self.nodes.len();
-        let r = (count as f32 * 20.0).max(300.0);
+        let r = (count as f32 * 10.0).max(140.0);
         let mut sorted_uris: Vec<_> = self.nodes.keys().cloned().collect();
         sorted_uris.sort();
         for (i, uri) in sorted_uris.into_iter().enumerate() {
             if let Some(node) = self.nodes.get_mut(&uri) {
                 let angle = (i as f32 / count as f32) * std::f32::consts::TAU;
-                node.pos = Vec2::new(r * angle.cos() + 500.0, r * angle.sin() + 500.0);
+                node.pos = Vec2::new(r * angle.cos() + 400.0, r * angle.sin() + 300.0);
             }
         }
     }
@@ -337,14 +337,14 @@ impl DarkstarApp {
                 NodeType::Blank => {}
             }
         }
-        let groups = vec![(classes, 150.0), (properties, 350.0), (individuals, 600.0), (literals, 800.0)];
+        let groups = vec![(classes, 65.0), (properties, 150.0), (individuals, 250.0), (literals, 350.0)];
         for (nodes, r) in groups {
             let count = nodes.len();
             if count == 0 { continue; }
             for (i, uri) in nodes.into_iter().enumerate() {
                 if let Some(node) = self.nodes.get_mut(&uri) {
                     let angle = (i as f32 / count as f32) * std::f32::consts::TAU;
-                    node.pos = Vec2::new(r * angle.cos() + 500.0, r * angle.sin() + 500.0);
+                    node.pos = Vec2::new(r * angle.cos() + 400.0, r * angle.sin() + 300.0);
                 }
             }
         }
@@ -360,31 +360,25 @@ impl DarkstarApp {
         for (key, node) in &self.nodes {
             keys.push(key.clone());
             
-            // Base radius/bounds for the node shape
+            // Base radius/bounds for the node shape (compact)
             let (base_w, base_h): (f32, f32) = match node.node_type {
-                NodeType::Class => (20.0, 20.0),
-                NodeType::Property => (30.0, 15.0),
-                NodeType::Individual => (20.0, 20.0),
-                NodeType::Literal => (25.0, 12.0),
-                NodeType::Blank => (20.0, 20.0),
+                NodeType::Class => (13.0, 13.0),
+                NodeType::Property => (16.0, 10.0),
+                NodeType::Individual => (13.0, 13.0),
+                NodeType::Literal => (14.0, 9.0),
+                NodeType::Blank => (11.0, 11.0),
             };
             
-            // Calculate label width. Average character width is around 6.0 pixels.
+            // Dynamic width: max of base width and label width with compact padding
             let label_len = node.label.chars().count() as f32;
-            let label_width = label_len * 6.0;
-            
-            // Dynamic width: max of base width and label width with some horizontal padding
-            let half_w = base_w.max(label_width * 0.5) + 12.0;
-            
-            // Dynamic height: base height + space for label + vertical padding
-            let half_h = base_h + 15.0;
+            let half_w = base_w.max(label_len * 2.2) + 5.0;
+            let half_h = base_h + 7.0;
             
             widths.push(half_w);
             heights.push(half_h);
         }
         
         let len = keys.len();
-        
         let mut positions: Vec<Vec2> = keys.iter().map(|k| self.nodes[k].pos).collect();
         
         for _ in 0..iterations {
