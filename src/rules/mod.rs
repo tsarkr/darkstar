@@ -39,10 +39,21 @@ pub const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
 pub fn extract_str<T: Term>(term: &T) -> String {
     if let Some(iri) = term.iri() {
         format!("i:{}", iri)
-    } else if let Some(lex) = term.lexical_form() {
-        format!("l:{}", lex)
     } else if let Some(bnode) = term.bnode_id() {
         format!("b:{}", bnode.as_str())
+    } else if let Some(lex) = term.lexical_form() {
+        if let Some(lang) = term.language_tag() {
+            format!("l:{}@{}", lex, lang.as_str())
+        } else if let Some(dt) = term.datatype() {
+            let dt_str = dt.as_str();
+            if dt_str == "http://www.w3.org/2001/XMLSchema#string" {
+                format!("l:{}", lex)
+            } else {
+                format!("l:{}^^{}", lex, dt_str)
+            }
+        } else {
+            format!("l:{}", lex)
+        }
     } else {
         format!("b:anon")
     }

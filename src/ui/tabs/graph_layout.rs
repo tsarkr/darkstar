@@ -63,7 +63,7 @@ impl DarkstarApp {
         };
 
         for uri in &nodes_for_typing {
-            if uri.starts_with("_:") {
+            if uri.starts_with("_:") || uri.starts_with("b:") {
                 node_types.insert(uri.clone(), NodeType::Blank);
                 continue;
             }
@@ -193,18 +193,22 @@ impl DarkstarApp {
 
         let mut new_node_count = 0;
         for uri in &seen_nodes {
-            if !self.nodes.contains_key(uri) {
+            let ntype = *node_types.get(uri).unwrap_or({
+                if uri.starts_with("l:") { &NodeType::Literal }
+                else if uri.starts_with("_:") || uri.starts_with("b:") { &NodeType::Blank }
+                else { &NodeType::Individual }
+            });
+            if let Some(node) = self.nodes.get_mut(uri) {
+                node.label = Self::get_label(uri);
+                node.node_type = ntype;
+            } else {
                 let angle = new_node_count as f32 * 137.5 * std::f32::consts::PI / 180.0;
                 let radius = (new_node_count as f32).sqrt() * 25.0;
                 self.nodes.insert(uri.clone(), GraphNode {
                     pos: Vec2::new(400.0 + angle.cos() * radius, 300.0 + angle.sin() * radius),
                     vel: Vec2::ZERO,
                     label: Self::get_label(uri),
-                    node_type: *node_types.get(uri).unwrap_or({
-                        if uri.starts_with("l:") { &NodeType::Literal }
-                        else if uri.starts_with("_:") { &NodeType::Blank }
-                        else { &NodeType::Individual }
-                    }),
+                    node_type: ntype,
                 });
                 new_node_count += 1;
             }

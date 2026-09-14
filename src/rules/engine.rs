@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use sophia::api::prelude::*;
 use sophia::inmem::graph::FastGraph;
-use sophia::api::term::{SimpleTerm, IriRef, BnodeId};
+use sophia::api::term::{SimpleTerm, IriRef, BnodeId, LanguageTag};
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 
@@ -86,9 +86,20 @@ impl InferenceEngine {
             let val = Self::intern(&s[2..]);
             SimpleTerm::Iri(IriRef::new_unchecked(val.into()))
         } else if s.starts_with("l:") {
-            let val = Self::intern(&s[2..]);
-            let xsd_string = IriRef::new_unchecked("http://www.w3.org/2001/XMLSchema#string".into());
-            SimpleTerm::LiteralDatatype(val.into(), xsd_string)
+            let raw = &s[2..];
+            if let Some(idx) = raw.rfind("^^") {
+                let lex = Self::intern(&raw[..idx]);
+                let dt = Self::intern(&raw[idx + 2..]);
+                SimpleTerm::LiteralDatatype(lex.into(), IriRef::new_unchecked(dt.into()))
+            } else if let Some(idx) = raw.rfind('@') {
+                let lex = Self::intern(&raw[..idx]);
+                let lang = Self::intern(&raw[idx + 1..]);
+                SimpleTerm::LiteralLanguage(lex.into(), LanguageTag::new_unchecked(lang.into()))
+            } else {
+                let val = Self::intern(raw);
+                let xsd_string = IriRef::new_unchecked("http://www.w3.org/2001/XMLSchema#string".into());
+                SimpleTerm::LiteralDatatype(val.into(), xsd_string)
+            }
         } else if s.starts_with("b:") {
             let val = Self::intern(&s[2..]);
             SimpleTerm::BlankNode(BnodeId::new_unchecked(val.into()))

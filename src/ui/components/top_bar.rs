@@ -11,14 +11,10 @@ impl DarkstarApp {
             egui::menu::bar(ui, |ui| {
                 // 1. File Menu
                 ui.menu_button(i.file, |ui| {
-                    if ui.button(i.new).clicked() { self.manager.new_ontology(); ui.close_menu(); }
+                    if ui.button(i.new).clicked() { self.new_ontology_file(); ui.close_menu(); }
                     if ui.button(i.open).clicked() {
                         if let Some(path) = rfd::FileDialog::new().add_filter("OWL/RDF", &["owl", "rdf", "ttl", "n3", "nt"]).pick_file() {
-                            if let Err(e) = self.manager.load_from_file(&path) { 
-                                eprintln!("Load error: {}", e); 
-                            } else {
-                                self.settings.add_recent(path);
-                            }
+                            self.open_ontology_file(&path);
                         }
                         ui.close_menu();
                     }
@@ -30,33 +26,60 @@ impl DarkstarApp {
                         } else {
                             for path in recent {
                                 if ui.button(path.to_string_lossy()).clicked() {
-                                    if let Err(e) = self.manager.load_from_file(&path) { 
-                                        eprintln!("Load error: {}", e); 
-                                    } else {
-                                        self.settings.add_recent(path);
-                                    }
+                                    self.open_ontology_file(&path);
                                     ui.close_menu();
                                 }
                             }
                         }
                     });
 
+                    if let Some(path) = self.manager.active_file_path.clone() {
+                        if ui.button(i.revert).clicked() {
+                            self.open_ontology_file(&path);
+                            ui.close_menu();
+                        }
+                    }
+
                     ui.separator();
                     if ui.button(i.save).clicked() {
                         if let Some(path) = self.manager.active_file_path.clone() {
-                            if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) { eprintln!("Save error: {}", e); }
+                            if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
+                                eprintln!("Save error: {}", e);
+                            } else {
+                                let is_korean = self.settings.language == Language::Korean;
+                                self.status_message = Some((
+                                    if is_korean { format!("'{}'에 저장되었습니다.", path.file_name().unwrap_or_default().to_string_lossy()) } else { format!("Saved to '{}'.", path.display()) },
+                                    std::time::Instant::now()
+                                ));
+                            }
                         } else {
-                            if let Some(path) = rfd::FileDialog::new().set_file_name("ontology.owl").save_file() {
-                                if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) { eprintln!("Save error: {}", e); }
-                                self.settings.add_recent(path);
+                            if let Some(path) = rfd::FileDialog::new().set_file_name("ontology.ttl").add_filter("Turtle", &["ttl"]).save_file() {
+                                if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
+                                    eprintln!("Save error: {}", e);
+                                } else {
+                                    self.settings.add_recent(path.clone());
+                                    let is_korean = self.settings.language == Language::Korean;
+                                    self.status_message = Some((
+                                        if is_korean { format!("'{}'에 저장되었습니다.", path.file_name().unwrap_or_default().to_string_lossy()) } else { format!("Saved to '{}'.", path.display()) },
+                                        std::time::Instant::now()
+                                    ));
+                                }
                             }
                         }
                         ui.close_menu();
                     }
                     if ui.button(i.save_as).clicked() {
-                        if let Some(path) = rfd::FileDialog::new().set_file_name("ontology.owl").save_file() {
-                            if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) { eprintln!("Save error: {}", e); }
-                            self.settings.add_recent(path);
+                        if let Some(path) = rfd::FileDialog::new().set_file_name("ontology.ttl").add_filter("Turtle", &["ttl"]).save_file() {
+                            if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
+                                eprintln!("Save error: {}", e);
+                            } else {
+                                self.settings.add_recent(path.clone());
+                                let is_korean = self.settings.language == Language::Korean;
+                                self.status_message = Some((
+                                    if is_korean { format!("'{}'에 저장되었습니다.", path.file_name().unwrap_or_default().to_string_lossy()) } else { format!("Saved to '{}'.", path.display()) },
+                                    std::time::Instant::now()
+                                ));
+                            }
                         }
                         ui.close_menu();
                     }

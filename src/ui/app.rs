@@ -78,6 +78,9 @@ pub struct DarkstarApp {
     pub show_plugin_manual: bool,
     pub plugin_manual_lang: Language,
 
+    pub external_file_changed: bool,
+    pub last_disk_check: std::time::Instant,
+
     // Caching for hierarchies & lists
     pub classes_cache_dirty: bool,
     pub class_roots: Vec<String>,
@@ -184,6 +187,8 @@ impl DarkstarApp {
             show_plugin_manual: false,
             plugin_manual_lang: settings.language,
             show_help: false,
+            external_file_changed: false,
+            last_disk_check: std::time::Instant::now(),
 
             classes_cache_dirty: true,
             class_roots: Vec::new(),
@@ -201,17 +206,196 @@ impl DarkstarApp {
         app
     }
 
-    pub fn get_label(prefixed_uri: &str) -> String {
-        let uri = if prefixed_uri.len() >= 2 && &prefixed_uri[1..2] == ":" {
-            &prefixed_uri[2..]
+    pub fn open_ontology_file(&mut self, path: &std::path::Path) {
+        let prev_path = self.manager.active_file_path.clone();
+        let prev_name = prev_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string());
+        let new_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+        match self.manager.load_from_file(path) {
+            Ok(_) => {
+                self.settings.add_recent(path.to_path_buf());
+                self.on_ontology_loaded();
+
+                let is_korean = self.settings.language == crate::core::settings::Language::Korean;
+                let msg = if let Some(prev) = prev_name {
+                    if is_korean {
+                        format!("기존 파일 '{}'을(를) 닫고 '{}'을(를) 새로 불러왔습니다.", prev, new_name)
+                    } else {
+                        format!("Closed previous file '{}' and successfully loaded '{}'.", prev, new_name)
+                    }
+                } else {
+                    if is_korean {
+                        format!("'{}' 파일을 성공적으로 불러왔습니다.", new_name)
+                    } else {
+                        format!("Successfully loaded '{}'.", new_name)
+                    }
+                };
+                self.status_message = Some((msg, std::time::Instant::now()));
+            }
+            Err(e) => {
+                let err_msg = format!("Failed to load {}: {}", new_name, e);
+                eprintln!("{}", err_msg);
+                self.status_message = Some((err_msg, std::time::Instant::now()));
+            }
+        }
+    }
+
+    pub fn new_ontology_file(&mut self) {
+        let prev_path = self.manager.active_file_path.clone();
+        let prev_name = prev_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string());
+
+        self.manager.new_ontology();
+        self.on_ontology_cleared();
+
+        let is_korean = self.settings.language == crate::core::settings::Language::Korean;
+        let msg = if let Some(prev) = prev_name {
+            if is_korean {
+                format!("기존 파일 '{}'을(를) 닫고 새 온톨로지를 생성했습니다.", prev)
+            } else {
+                format!("Closed '{}' and created a new empty ontology.", prev)
+            }
         } else {
-            prefixed_uri
+            if is_korean {
+                "새 온톨로지를 생성했습니다.".to_string()
+            } else {
+                "Created new empty ontology.".to_string()
+            }
         };
-        uri.split('/').last().unwrap_or(uri).split('#').last().unwrap_or(uri).to_string()
+        self.status_message = Some((msg, std::time::Instant::now()));
+    }
+
+    pub fn on_ontology_loaded(&mut self) {
+        // 1. Clear all graph nodes and edges completely
+        self.nodes.clear();
+        self.edges.clear();
+        self.selected_uri = None;
+        self.expanded_nodes.clear();
+        self.selected_individuals.clear();
+        self.dragging_node = None;
+        self.last_graph_rect = None;
+        self.graph_offset = Vec2::ZERO;
+        self.graph_scale = 1.0;
+        self.trigger_fit = true;
+        self.graph_needs_sync = true;
+
+        // 2. Invalidate entity trees and caches
+        self.classes_cache_dirty = true;
+        self.properties_cache_dirty = true;
+        self.individuals_cache_dirty = true;
+        self.class_roots.clear();
+        self.class_children.clear();
+        self.object_prop_roots.clear();
+        self.object_prop_children.clear();
+        self.datatype_prop_roots.clear();
+        self.datatype_prop_children.clear();
+        self.individuals_by_type.clear();
+
+        // 3. Synchronize source editor
+        self.source_code_error = None;
+        self.source_needs_sync = false;
+        if let Ok(turtle) = self.manager.serialize_to_string(crate::core::io::OntologyFormat::Turtle, false) {
+            self.source_code_buffer = turtle;
+        } else {
+            self.source_code_buffer.clear();
+        }
+
+        // 4. Run reasoning with active user settings
+        self.manager.run_reasoning(&self.settings.enabled_rules);
+
+        // 5. Notify plugins
+        let event = crate::core::history::DarkstarEvent::Batch(vec![]);
+        for plugin in &mut self.plugin_manager.plugins {
+            plugin.handle_event(&event, &mut self.manager);
+        }
+    }
+
+    pub fn on_ontology_cleared(&mut self) {
+        self.nodes.clear();
+        self.edges.clear();
+        self.selected_uri = None;
+        self.expanded_nodes.clear();
+        self.selected_individuals.clear();
+        self.dragging_node = None;
+        self.last_graph_rect = None;
+        self.graph_offset = Vec2::ZERO;
+        self.graph_scale = 1.0;
+        self.trigger_fit = true;
+        self.graph_needs_sync = true;
+
+        self.classes_cache_dirty = true;
+        self.properties_cache_dirty = true;
+        self.individuals_cache_dirty = true;
+        self.class_roots.clear();
+        self.class_children.clear();
+        self.object_prop_roots.clear();
+        self.object_prop_children.clear();
+        self.datatype_prop_roots.clear();
+        self.datatype_prop_children.clear();
+        self.individuals_by_type.clear();
+
+        self.source_code_error = None;
+        self.source_needs_sync = false;
+        self.source_code_buffer.clear();
+
+        let event = crate::core::history::DarkstarEvent::Batch(vec![]);
+        for plugin in &mut self.plugin_manager.plugins {
+            plugin.handle_event(&event, &mut self.manager);
+        }
+    }
+
+    pub fn get_label(prefixed_uri: &str) -> String {
+        if prefixed_uri.starts_with("l:") {
+            let raw = &prefixed_uri[2..];
+            if let Some(idx) = raw.rfind("^^") {
+                let val = &raw[..idx];
+                let dt = &raw[idx + 2..];
+                let dt_name = dt.split('/').last().unwrap_or(dt).split('#').last().unwrap_or(dt);
+                format!("\"{}\"^^{}", val, dt_name)
+            } else if let Some(idx) = raw.rfind('@') {
+                format!("\"{}\"@{}", &raw[..idx], &raw[idx + 1..])
+            } else {
+                format!("\"{}\"", raw)
+            }
+        } else if prefixed_uri.starts_with("b:") {
+            let bnode = &prefixed_uri[2..];
+            format!("_:{}", bnode)
+        } else {
+            let uri = if prefixed_uri.len() >= 2 && &prefixed_uri[1..2] == ":" {
+                &prefixed_uri[2..]
+            } else {
+                prefixed_uri
+            };
+            uri.split('/').last().unwrap_or(uri).split('#').last().unwrap_or(uri).to_string()
+        }
     }
 
     pub fn render_main(&mut self, ctx: &egui::Context) {
         ctx.set_visuals(if self.settings.theme_dark { egui::Visuals::dark() } else { egui::Visuals::light() });
+
+        // Check external file modification periodically
+        if self.last_disk_check.elapsed() >= std::time::Duration::from_millis(1000) {
+            self.last_disk_check = std::time::Instant::now();
+            if let Some(path) = &self.manager.active_file_path {
+                if let Ok(meta) = std::fs::metadata(path) {
+                    if let Ok(disk_mtime) = meta.modified() {
+                        if let Some(last_known) = self.manager.file_modified_time {
+                            if disk_mtime > last_known && !self.external_file_changed {
+                                self.external_file_changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Drain events and notify plugins
         let events: Vec<_> = self.manager.event_queue.drain(..).collect();
@@ -240,6 +424,7 @@ impl DarkstarApp {
         self.render_settings(ctx);
         self.render_help(ctx);
         self.render_top_bar(ctx);
+        self.render_status_bar(ctx);
         self.render_dialogs(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut dock_state = std::mem::replace(&mut self.dock_state, egui_dock::DockState::new(vec![]));
@@ -248,6 +433,75 @@ impl DarkstarApp {
                 egui_dock::DockArea::new(&mut dock_state).show_inside(ui, &mut viewer);
             }
             self.dock_state = dock_state;
+        });
+    }
+
+    pub fn render_status_bar(&mut self, ctx: &egui::Context) {
+        let i = self.i18n();
+        let is_korean = self.settings.language == Language::Korean;
+
+        egui::TopBottomPanel::bottom("bottom_status_panel").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                // Status message or active file info
+                let mut has_message = false;
+                if let Some((msg, time)) = &self.status_message {
+                    if time.elapsed().as_secs() < 8 {
+                        has_message = true;
+                        ui.label(
+                            egui::RichText::new(format!("ℹ {}", msg))
+                                .color(if self.settings.theme_dark { egui::Color32::from_rgb(120, 220, 160) } else { egui::Color32::from_rgb(20, 140, 60) })
+                                .strong()
+                        );
+                    }
+                }
+
+                if !has_message {
+                    if let Some(path) = &self.manager.active_file_path {
+                        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("ontology");
+                        let dirty_flag = if self.manager.needs_save { "*" } else { "" };
+                        ui.label(format!("📄 {}{}", filename, dirty_flag));
+                    } else {
+                        ui.label(format!("✨ {}", i.status_ready));
+                    }
+                }
+
+                // If external file change was detected
+                if self.external_file_changed {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(if is_korean { "⚠️ 파일이 외부에서 변경되었습니다!" } else { "⚠️ File changed externally!" })
+                            .color(egui::Color32::YELLOW)
+                            .strong()
+                    );
+                    if ui.button(if is_korean { "새로고침 (다시 로드)" } else { "Reload" }).clicked() {
+                        if let Some(path) = self.manager.active_file_path.clone() {
+                            self.open_ontology_file(&path);
+                        }
+                        self.external_file_changed = false;
+                    }
+                    if ui.button(if is_korean { "무시" } else { "Ignore" }).clicked() {
+                        if let Some(path) = &self.manager.active_file_path {
+                            self.manager.file_modified_time = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+                        }
+                        self.external_file_changed = false;
+                    }
+                }
+
+                // Right aligned stats
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Consistency badge
+                    if self.manager.memory.is_consistent {
+                        ui.label(egui::RichText::new(format!("● {}", i.consistent)).color(egui::Color32::GREEN).size(11.0));
+                    } else {
+                        ui.label(egui::RichText::new(format!("● {}", i.inconsistent)).color(egui::Color32::RED).size(11.0));
+                    }
+                    ui.separator();
+                    
+                    let inf_count = self.manager.memory.inferred_graph.triples().count();
+                    let assert_count = self.manager.memory.asserted_graph.triples().count();
+                    ui.label(format!("Triples: {} (+{} inferred)", assert_count, inf_count));
+                });
+            });
         });
     }
 

@@ -7,6 +7,7 @@ use crate::memory::EngineMemory;
 pub struct DarkstarManager {
     pub memory: EngineMemory,
     pub active_file_path: Option<PathBuf>,
+    pub file_modified_time: Option<std::time::SystemTime>,
     pub history: ChangeHistory,
     pub is_dirty: bool,
     pub needs_save: bool,
@@ -19,6 +20,7 @@ impl DarkstarManager {
         Self {
             memory: EngineMemory::new(),
             active_file_path: None,
+            file_modified_time: None,
             history: ChangeHistory::new(),
             is_dirty: false,
             needs_save: false,
@@ -30,6 +32,7 @@ impl DarkstarManager {
     pub fn new_ontology(&mut self) {
         self.memory.clear();
         self.active_file_path = None;
+        self.file_modified_time = None;
         self.history.clear();
         self.is_dirty = false;
         self.needs_save = false;
@@ -180,8 +183,7 @@ impl DarkstarManager {
         Ok(())
     }
 
-    pub fn replace_from_string(&mut self, data: &str, format: crate::core::io::OntologyFormat) -> Result<(), Box<dyn std::error::Error>> {
-        let rules_settings = crate::core::settings::ReasonerRules::default();
+    pub fn replace_from_string(&mut self, data: &str, format: crate::core::io::OntologyFormat, rules_settings: &crate::core::settings::ReasonerRules) -> Result<(), Box<dyn std::error::Error>> {
         let mut temp_graph = sophia::inmem::graph::FastGraph::new();
         match format {
             crate::core::io::OntologyFormat::Turtle => {
@@ -219,13 +221,23 @@ impl DarkstarManager {
         }
         changes.extend(removed);
 
+        // Directly adopt the freshly parsed graph to preserve exact typed literals, language tags, and blank nodes
+        self.memory.asserted_graph = temp_graph;
+        self.memory.main_graph = self.memory.asserted_graph.clone();
+        self.memory.delta_graph = self.memory.asserted_graph.clone();
+        self.is_dirty = true;
+        self.needs_save = true;
+
         if !changes.is_empty() {
             let batch = DarkstarEvent::Batch(changes);
-            self.apply_event(batch.clone());
             self.history.push_change(batch.clone());
             self.event_queue.push(batch);
-            self.run_reasoning(&rules_settings);
+        } else {
+            self.event_queue.push(DarkstarEvent::Batch(vec![]));
         }
+
+        self.engine.run_inference(&mut self.memory, rules_settings);
+        self.is_dirty = false;
         
         Ok(())
     }
@@ -261,6 +273,7 @@ impl DarkstarManager {
         self.engine.run_inference(&mut self.memory, &rules_settings);
         
         self.active_file_path = Some(path.to_path_buf());
+        self.file_modified_time = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         self.needs_save = false;
         Ok(())
     }
@@ -292,8 +305,54 @@ impl DarkstarManager {
     pub fn save_to_file(&mut self, path: &std::path::Path, format: crate::core::io::OntologyFormat, include_inferred: bool) -> Result<(), Box<dyn std::error::Error>> {
         let data = self.serialize_to_string(format, include_inferred)?;
         std::fs::write(path, data)?;
+        self.active_file_path = Some(path.to_path_buf());
+        self.file_modified_time = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         self.needs_save = false;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::io::OntologyFormat;
+    use crate::core::settings::ReasonerRules;
+
+    #[test]
+    fn test_replace_from_string_preserves_literals_and_replaces_cleanly() {
+        let mut manager = DarkstarManager::new();
+        let rules = ReasonerRules::default();
+
+        let initial_ttl = r#"
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+            ex:john a ex:Person ;
+                ex:age "25"^^xsd:integer ;
+                ex:name "John Doe"@en .
+        "#;
+
+        manager.replace_from_string(initial_ttl, OntologyFormat::Turtle, &rules).unwrap();
+        assert_eq!(manager.memory.asserted_graph.triples().count(), 3);
+
+        // Update the TTL: change age from 25 to 26 and add nationality
+        let updated_ttl = r#"
+            @prefix ex: <http://example.org/> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+            ex:john a ex:Person ;
+                ex:age "26"^^xsd:integer ;
+                ex:name "John Doe"@en ;
+                ex:nationality "Korean" .
+        "#;
+
+        manager.replace_from_string(updated_ttl, OntologyFormat::Turtle, &rules).unwrap();
+        assert_eq!(manager.memory.asserted_graph.triples().count(), 4);
+
+        // Serialize and verify datatypes are preserved
+        let serialized = manager.serialize_to_string(OntologyFormat::Turtle, false).unwrap();
+        assert!(serialized.contains("26"));
+        assert!(!serialized.contains("25"));
     }
 }
 

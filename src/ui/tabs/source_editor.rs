@@ -13,11 +13,19 @@ impl DarkstarApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Apply Changes button
                     if ui.button(egui::RichText::new(i.apply_changes).color(egui::Color32::from_rgb(100, 200, 100))).clicked() {
-                        match self.manager.replace_from_string(&self.source_code_buffer, OntologyFormat::Turtle) {
+                        match self.manager.replace_from_string(&self.source_code_buffer, OntologyFormat::Turtle, &self.settings.enabled_rules) {
                             Ok(_) => {
                                 self.source_code_error = None;
                                 self.graph_needs_sync = true;
+                                self.classes_cache_dirty = true;
+                                self.properties_cache_dirty = true;
+                                self.individuals_cache_dirty = true;
                                 self.source_needs_sync = false;
+                                let is_korean = self.settings.language == crate::core::settings::Language::Korean;
+                                self.status_message = Some((
+                                    if is_korean { "소스 코드 변경 사항이 온톨로지에 적용되었습니다." } else { "Source code changes applied to ontology." }.to_string(),
+                                    std::time::Instant::now()
+                                ));
                             }
                             Err(e) => {
                                 self.source_code_error = Some(format!("Parse Error: {}", e));
