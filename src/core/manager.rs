@@ -12,6 +12,11 @@ pub struct DarkstarManager {
     pub is_dirty: bool,
     pub needs_save: bool,
     pub event_queue: Vec<DarkstarEvent>,
+    /// Monotonic counter bumped on every change to the asserted/inferred graphs.
+    /// UI layers compare it against their last-seen value to invalidate caches cheaply.
+    pub revision: u64,
+    /// Set when a change cannot be handled incrementally (removals, reloads, rule changes).
+    needs_full_reasoning: bool,
     engine: InferenceEngine,
 }
 
@@ -25,6 +30,8 @@ impl DarkstarManager {
             is_dirty: false,
             needs_save: false,
             event_queue: Vec::new(),
+            revision: 0,
+            needs_full_reasoning: false,
             engine: InferenceEngine::new(),
         }
     }
@@ -36,7 +43,15 @@ impl DarkstarManager {
         self.history.clear();
         self.is_dirty = false;
         self.needs_save = false;
+        self.needs_full_reasoning = false;
         self.event_queue.clear();
+        self.revision += 1;
+    }
+
+    /// Forces the next `run_reasoning` call to fully re-materialize (e.g. after rule settings change).
+    pub fn invalidate_reasoning(&mut self) {
+        self.is_dirty = true;
+        self.needs_full_reasoning = true;
     }
 
     pub fn add_assertion(&mut self, s: String, p: String, o: String) {
@@ -56,6 +71,7 @@ impl DarkstarManager {
         self.memory.delta_graph.insert(&s_term, &p_term, &o_term).unwrap();
         self.is_dirty = true;
         self.needs_save = true;
+        self.revision += 1;
     }
 
     pub fn remove_assertion(&mut self, s: String, p: String, o: String) {
@@ -74,6 +90,22 @@ impl DarkstarManager {
         self.memory.main_graph.remove(&s_term, &p_term, &o_term).unwrap();
         self.is_dirty = true;
         self.needs_save = true;
+        // Inferences derived from the removed triple may now be unsupported.
+        self.needs_full_reasoning = true;
+        self.revision += 1;
+    }
+
+    /// Removes many assertions as a single undoable change (one history entry, one event).
+    pub fn remove_assertions_batch(&mut self, triples: Vec<(String, String, String)>) {
+        if triples.is_empty() { return; }
+        let events: Vec<DarkstarEvent> = triples
+            .into_iter()
+            .map(|(s, p, o)| DarkstarEvent::AxiomRemoved { s, p, o })
+            .collect();
+        let batch = DarkstarEvent::Batch(events);
+        self.apply_event(batch.clone());
+        self.history.push_change(batch.clone());
+        self.event_queue.push(batch);
     }
 
     pub fn undo(&mut self) {
@@ -118,8 +150,15 @@ impl DarkstarManager {
 
     pub fn run_reasoning(&mut self, rules_settings: &crate::core::settings::ReasonerRules) {
         if self.is_dirty {
-            self.engine.run_inference(&mut self.memory, rules_settings);
+            if self.needs_full_reasoning || !self.memory.is_consistent {
+                self.engine.run_inference(&mut self.memory, rules_settings);
+            } else {
+                // Addition-only changes: only propagate the newly added triples.
+                self.engine.run_incremental(&mut self.memory, rules_settings);
+            }
+            self.needs_full_reasoning = false;
             self.is_dirty = false;
+            self.revision += 1;
         }
     }
 
@@ -221,10 +260,9 @@ impl DarkstarManager {
         }
         changes.extend(removed);
 
-        // Directly adopt the freshly parsed graph to preserve exact typed literals, language tags, and blank nodes
+        // Directly adopt the freshly parsed graph to preserve exact typed literals, language tags, and blank nodes.
+        // (main/delta graphs are rebuilt by run_inference, so no extra clones are needed here.)
         self.memory.asserted_graph = temp_graph;
-        self.memory.main_graph = self.memory.asserted_graph.clone();
-        self.memory.delta_graph = self.memory.asserted_graph.clone();
         self.is_dirty = true;
         self.needs_save = true;
 
@@ -238,11 +276,13 @@ impl DarkstarManager {
 
         self.engine.run_inference(&mut self.memory, rules_settings);
         self.is_dirty = false;
+        self.needs_full_reasoning = false;
+        self.revision += 1;
         
         Ok(())
     }
 
-    pub fn load_from_file(&mut self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn load_from_file(&mut self, path: &std::path::Path, rules_settings: &crate::core::settings::ReasonerRules) -> Result<(), Box<dyn std::error::Error>> {
         self.memory.clear();
         let data = std::fs::read_to_string(path)?;
         let format = if path.extension().and_then(|e| e.to_str()) == Some("nt") {
@@ -251,6 +291,7 @@ impl DarkstarManager {
             crate::core::io::OntologyFormat::Turtle
         };
         
+        let parse_start = std::time::Instant::now();
         match format {
             crate::core::io::OntologyFormat::Turtle => {
                 let parser = sophia::turtle::parser::turtle::TurtleParser { base: None }.parse_str(&data);
@@ -261,16 +302,18 @@ impl DarkstarManager {
                 self.memory.asserted_graph.insert_all(parser)?;
             }
         }
+        drop(data);
+        println!("Darkstar: parsed {:?} in {:?}", path.file_name().unwrap_or_default(), parse_start.elapsed());
 
-        self.memory.main_graph = self.memory.asserted_graph.clone();
-        self.memory.delta_graph = self.memory.asserted_graph.clone();
         self.is_dirty = false;
         
         self.history.clear();
         self.event_queue.clear();
         
-        let rules_settings = crate::core::settings::ReasonerRules::default();
-        self.engine.run_inference(&mut self.memory, &rules_settings);
+        // run_inference builds main_graph from asserted_graph (single clone).
+        self.engine.run_inference(&mut self.memory, rules_settings);
+        self.needs_full_reasoning = false;
+        self.revision += 1;
         
         self.active_file_path = Some(path.to_path_buf());
         self.file_modified_time = std::fs::metadata(path).and_then(|m| m.modified()).ok();

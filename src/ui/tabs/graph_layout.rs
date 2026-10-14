@@ -5,6 +5,9 @@ use sophia::api::prelude::*;
 use crate::ui::app::DarkstarApp;
 use crate::ui::{GraphNode, GraphEdge, NodeType, LayoutMode};
 
+/// Focus-mode node cap per step; the graph's "show more" button adds this many again.
+pub const FOCUS_NODES_STEP: usize = 300;
+
 impl DarkstarApp {
     pub fn sync_graph(&mut self) {
         let mut new_edges = Vec::new();
@@ -17,7 +20,18 @@ impl DarkstarApp {
         let owl_data_prop = "i:http://www.w3.org/2002/07/owl#DatatypeProperty";
         let owl_individual = "i:http://www.w3.org/2002/07/owl#NamedIndividual";
 
+        // Reset the "show more" limit whenever the focused entity changes.
+        if self.focus_limit_uri != self.selected_uri {
+            self.focus_limit_uri = self.selected_uri.clone();
+            self.focus_node_limit = FOCUS_NODES_STEP;
+        }
+        let limit = self.focus_node_limit;
+        let query = self.search_query.trim().to_lowercase();
+        if !query.is_empty() { self.ensure_label_index(); }
+        self.graph_sync_query = self.search_query.clone();
+
         let mut visible_in_focus = HashSet::new();
+        let mut truncated = false;
         if self.filters.focus_mode {
             let mut roots = Vec::new();
             if let Some(selected) = &self.selected_uri { roots.push(selected.clone()); }
@@ -26,26 +40,52 @@ impl DarkstarApp {
             let mut queue = std::collections::VecDeque::new();
             for r in roots { queue.push_back((r, 0)); }
 
+            // Hub nodes (e.g. a class with 100k+ instances) would otherwise pull every neighbour
+            // into the view, and layout/force simulation is O(n^2). Exploration stops at `limit`.
+            // When a search query is active, neighbours matching it are taken first, so a
+            // searched entity still shows up even if it sits behind a hub.
             while let Some((u, d)) = queue.pop_front() {
+                if visible_in_focus.len() >= limit {
+                    truncated = true;
+                    break;
+                }
                 if !visible_in_focus.insert(u.clone()) { continue; }
                 if d >= self.filters.expansion_depth { continue; }
 
+                // How many more neighbours are worth queueing from this node.
+                let budget = (limit * 2).saturating_sub(queue.len() + visible_in_focus.len());
+                let mut matched: Vec<String> = Vec::new();
+                let mut others: Vec<String> = Vec::new();
+
                 let graphs = [&self.manager.memory.asserted_graph, &self.manager.memory.inferred_graph];
                 let u_term = crate::rules::engine::InferenceEngine::make_term(&u);
-                for g in graphs {
-                    // Outgoing edges
-                    for t in g.triples_matching(Some(&u_term), sophia::api::term::matcher::Any, sophia::api::term::matcher::Any).flatten() {
-                        let o = crate::rules::extract_str(&t.o());
-                        queue.push_back((o, d + 1));
-                    }
-                    // Incoming edges
-                    for t in g.triples_matching(sophia::api::term::matcher::Any, sophia::api::term::matcher::Any, Some(&u_term)).flatten() {
-                        let s = crate::rules::extract_str(&t.s());
-                        queue.push_back((s, d + 1));
+                'neigh: for g in graphs {
+                    let outgoing = g.triples_matching(Some(&u_term), sophia::api::term::matcher::Any, sophia::api::term::matcher::Any)
+                        .flatten().map(|t| crate::rules::extract_str(&t.o()));
+                    let incoming = g.triples_matching(sophia::api::term::matcher::Any, sophia::api::term::matcher::Any, Some(&u_term))
+                        .flatten().map(|t| crate::rules::extract_str(&t.s()));
+                    for n in outgoing.chain(incoming) {
+                        if query.is_empty() {
+                            if others.len() >= budget { truncated = true; break 'neigh; }
+                            others.push(n);
+                        } else if self.matches_search(&n, &Self::get_label(&n), &query) {
+                            if matched.len() < budget { matched.push(n); } else { truncated = true; }
+                        } else if others.len() < budget {
+                            others.push(n);
+                        } else {
+                            truncated = true;
+                            if matched.len() >= budget { break 'neigh; }
+                        }
                     }
                 }
+
+                // Matches jump the queue; the rest fill whatever budget remains.
+                let remaining = budget.saturating_sub(matched.len());
+                for n in matched.into_iter().rev() { queue.push_front((n, d + 1)); }
+                for n in others.into_iter().take(remaining) { queue.push_back((n, d + 1)); }
             }
         }
+        self.graph_truncated = truncated;
 
         // Build node types on-demand for visible nodes (or a capped sample of nodes if focus_mode is disabled)
         let nodes_for_typing: HashSet<String> = if self.filters.focus_mode {

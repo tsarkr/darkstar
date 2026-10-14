@@ -2,6 +2,7 @@ pub mod app;
 pub mod dock;
 pub mod tabs;
 pub mod components;
+pub mod search;
 
 use eframe::egui;
 use egui::Vec2;
@@ -37,6 +38,14 @@ pub struct GraphNode {
     pub vel: Vec2,
     pub label: String,
     pub node_type: NodeType,
+}
+
+/// One row of the virtualized Individuals list.
+pub enum IndividualRow {
+    /// A type header: (type URI, display text incl. count)
+    Header { type_uri: String, text: String, collapsed: bool },
+    /// An individual: (URI, display label)
+    Item { uri: String, label: String },
 }
 
 pub struct GraphEdge {

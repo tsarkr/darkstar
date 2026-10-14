@@ -115,11 +115,16 @@ impl DarkstarApp {
                     format!("Batch Action ({} items)", events.len())
                 };
                 ui.collapsing(egui::RichText::new(text).color(label_color), |ui| {
-                    for e in events {
+                    // A batch (e.g. applying a large source edit) can hold 100k+ items.
+                    const MAX_BATCH_ROWS: usize = 200;
+                    for e in events.iter().take(MAX_BATCH_ROWS) {
                         ui.horizontal(|ui| {
                             ui.add_space(10.0);
                             self.render_history_event(ui, e, is_korean, active);
                         });
+                    }
+                    if events.len() > MAX_BATCH_ROWS {
+                        ui.label(egui::RichText::new(format!("… (+{})", events.len() - MAX_BATCH_ROWS)).weak());
                     }
                 });
             }

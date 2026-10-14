@@ -10,6 +10,8 @@ use std::collections::HashMap;
 pub struct EntityStatsPlugin {
     counts: HashMap<String, usize>,
     total_triples: usize,
+    /// Set by events; the (full-graph) refresh runs lazily when the tab is actually shown.
+    dirty: bool,
 }
 
 impl EntityStatsPlugin {
@@ -17,6 +19,7 @@ impl EntityStatsPlugin {
         Self {
             counts: HashMap::new(),
             total_triples: 0,
+            dirty: true,
         }
     }
 
@@ -30,19 +33,14 @@ impl EntityStatsPlugin {
         let owl_data_prop = InferenceEngine::make_term("http://www.w3.org/2002/07/owl#DatatypeProperty");
         let owl_individual = InferenceEngine::make_term("http://www.w3.org/2002/07/owl#NamedIndividual");
 
-        let mut classes = 0;
-        let mut obj_props = 0;
-        let mut data_props = 0;
-        let mut individuals = 0;
-
-        for t in manager.memory.main_graph.triples().flatten() {
-            if rdf_type == t.p() {
-                if owl_class == t.o() { classes += 1; }
-                else if owl_obj_prop == t.o() { obj_props += 1; }
-                else if owl_data_prop == t.o() { data_props += 1; }
-                else if owl_individual == t.o() { individuals += 1; }
-            }
-        }
+        // Indexed (predicate, object) lookups instead of scanning every triple.
+        use sophia::api::term::matcher::Any;
+        let g = &manager.memory.main_graph;
+        let count = |ty: &sophia::api::term::SimpleTerm<'static>| g.triples_matching(Any, Some(&rdf_type), Some(ty)).count();
+        let classes = count(&owl_class);
+        let obj_props = count(&owl_obj_prop);
+        let data_props = count(&owl_data_prop);
+        let individuals = count(&owl_individual);
 
         self.counts.insert("Classes".to_string(), classes);
         self.counts.insert("Object Properties".to_string(), obj_props);
@@ -62,11 +60,15 @@ impl DarkstarPlugin for EntityStatsPlugin {
     }
     fn version(&self) -> &str { "1.0.0" }
 
-    fn init(&mut self, manager: &mut DarkstarManager) {
-        self.refresh(manager);
+    fn init(&mut self, _manager: &mut DarkstarManager) {
+        self.dirty = true;
     }
 
     fn render_tab(&mut self, ui: &mut egui::Ui, manager: &mut DarkstarManager, l10n: &L10n) {
+        if self.dirty {
+            self.refresh(manager);
+            self.dirty = false;
+        }
         ui.heading(format!("📊 {}", l10n.entity_stats));
         ui.add_space(10.0);
         
@@ -98,7 +100,8 @@ impl DarkstarPlugin for EntityStatsPlugin {
         }
     }
 
-    fn handle_event(&mut self, _event: &DarkstarEvent, manager: &mut DarkstarManager) {
-        self.refresh(manager);
+    fn handle_event(&mut self, _event: &DarkstarEvent, _manager: &mut DarkstarManager) {
+        // Don't rescan the whole graph on every edit; refresh when the tab is next shown.
+        self.dirty = true;
     }
 }

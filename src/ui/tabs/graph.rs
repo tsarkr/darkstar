@@ -7,6 +7,7 @@ use crate::ui::{LayoutMode, NodeType};
 impl DarkstarApp {
     pub fn render_graph_tab(&mut self, ui: &mut egui::Ui) {
         let i = self.i18n();
+        if !self.search_query.is_empty() { self.ensure_label_index(); }
         
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
@@ -78,14 +79,32 @@ impl DarkstarApp {
                 ui.label(egui::RichText::new(i.select_entity).size(11.0).weak());
             });
         } else {
+            if self.graph_truncated && self.filters.focus_mode && self.search_query != self.graph_sync_query {
+                self.graph_needs_sync = true;
+            }
             if self.graph_needs_sync {
                 self.sync_graph();
             }
             
+            if self.graph_truncated && self.filters.focus_mode {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!(
+                        "ℹ 연결된 개체가 많아 {}개까지만 표시 중입니다.{}",
+                        self.focus_node_limit,
+                        if self.search_query.is_empty() { " 검색어를 입력하면 일치하는 개체를 먼저 보여줍니다." } else { " 검색어와 일치하는 개체를 우선 표시합니다." }
+                    )).size(11.0).color(egui::Color32::from_rgb(230, 160, 40)));
+                    if ui.button(format!("➕ {}개 더 보기", crate::ui::tabs::graph_layout::FOCUS_NODES_STEP)).clicked() {
+                        self.focus_node_limit += crate::ui::tabs::graph_layout::FOCUS_NODES_STEP;
+                        self.graph_needs_sync = true;
+                        self.simulation_alpha = 20.0;
+                    }
+                });
+            }
+
             if self.nodes.len() > 150 {
                 let mut frame = egui::Frame::group(ui.style());
                 frame.fill = if self.settings.theme_dark { egui::Color32::from_rgb(45, 35, 15) } else { egui::Color32::from_rgb(255, 245, 220) };
-                frame.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(230, 140, 0));
+                frame.stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(230, 140, 0));
                 frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("⚠️").size(14.0));
@@ -545,14 +564,13 @@ impl DarkstarApp {
             }
 
             // 4.2. Draw Node Shapes and Halos
+            let search_lower = self.search_query.trim().to_lowercase();
             for (uri, node) in &self.nodes {
                 let pos = to_screen_pos(node.pos, self.graph_offset, self.graph_scale);
                 let is_selected = self.selected_uri.as_deref() == Some(uri);
                 let is_hovered = hovered_node_uri.as_deref() == Some(uri);
                 let is_connected_to_active = connected_nodes.contains(uri.as_str());
-                let matches_search = !self.search_query.is_empty() && 
-                    (node.label.to_lowercase().contains(&self.search_query.to_lowercase()) || 
-                     uri.to_lowercase().contains(&self.search_query.to_lowercase()));
+                let matches_search = !search_lower.is_empty() && self.matches_search(uri, &node.label, &search_lower);
                 
                 let radius = base_radius;
                 let is_expanded = self.expanded_nodes.contains(uri);

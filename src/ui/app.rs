@@ -94,6 +94,35 @@ pub struct DarkstarApp {
     
     pub individuals_cache_dirty: bool,
     pub individuals_by_type: HashMap<String, Vec<String>>,
+
+    // Virtualized individuals list (flattened rows, rebuilt only when data/query/collapse state changes)
+    pub individual_rows: Vec<crate::ui::IndividualRow>,
+    pub individual_rows_dirty: bool,
+    pub individual_rows_query: String,
+    pub collapsed_types: HashSet<String>,
+
+    /// Last `manager.revision` the UI caches were built against.
+    pub cache_revision: u64,
+    /// Cached (asserted, inferred) triple counts for the status bar.
+    pub triple_counts: (usize, usize),
+    /// True when focus-mode graph exploration hit the node cap.
+    pub graph_truncated: bool,
+    /// Source editor: user explicitly asked to load a very large ontology into the text editor.
+    pub source_force_full: bool,
+    /// Source editor: read-only preview shown for very large ontologies.
+    pub source_preview: Option<String>,
+
+    /// Search: entity -> lowercased rdfs:label text (built lazily per revision)
+    pub label_index: HashMap<String, String>,
+    pub label_index_revision: u64,
+    /// Focus-mode node cap; raised by the graph's "show more" button, reset on new selection.
+    pub focus_node_limit: usize,
+    pub focus_limit_uri: Option<String>,
+    /// Search query the graph was last synced with (resync when it changes while truncated).
+    pub graph_sync_query: String,
+    /// Entity editor: rows shown per section [asserted, inferred, incoming], reset on new selection.
+    pub relation_limits: [usize; 3],
+    pub relation_limits_uri: Option<String>,
 }
 
 impl DarkstarApp {
@@ -200,6 +229,22 @@ impl DarkstarApp {
             datatype_prop_children: HashMap::new(),
             individuals_cache_dirty: true,
             individuals_by_type: HashMap::new(),
+            individual_rows: Vec::new(),
+            individual_rows_dirty: true,
+            individual_rows_query: String::new(),
+            collapsed_types: HashSet::new(),
+            cache_revision: u64::MAX,
+            triple_counts: (0, 0),
+            graph_truncated: false,
+            source_force_full: false,
+            source_preview: None,
+            label_index: HashMap::new(),
+            label_index_revision: u64::MAX,
+            focus_node_limit: crate::ui::tabs::graph_layout::FOCUS_NODES_STEP,
+            focus_limit_uri: None,
+            graph_sync_query: String::new(),
+            relation_limits: [crate::ui::tabs::entity_editor::RELATION_ROWS_STEP; 3],
+            relation_limits_uri: None,
         };
         
         crate::plugins::load_all(&mut app.plugin_manager, &mut app.manager);
@@ -217,7 +262,7 @@ impl DarkstarApp {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
 
-        match self.manager.load_from_file(path) {
+        match self.manager.load_from_file(path, &self.settings.enabled_rules) {
             Ok(_) => {
                 self.settings.add_recent(path.to_path_buf());
                 self.on_ontology_loaded();
@@ -299,14 +344,15 @@ impl DarkstarApp {
         self.datatype_prop_children.clear();
         self.individuals_by_type.clear();
 
-        // 3. Synchronize source editor
+        // 3. Source editor is synchronized lazily (only when its tab is actually visible).
+        //    Serializing a large ontology eagerly costs hundreds of ms and tens of MB.
         self.source_code_error = None;
-        self.source_needs_sync = false;
-        if let Ok(turtle) = self.manager.serialize_to_string(crate::core::io::OntologyFormat::Turtle, false) {
-            self.source_code_buffer = turtle;
-        } else {
-            self.source_code_buffer.clear();
-        }
+        self.source_code_buffer.clear();
+        self.source_preview = None;
+        self.source_force_full = false;
+        self.source_needs_sync = true;
+        self.collapsed_types.clear();
+        self.individual_rows_dirty = true;
 
         // 4. Run reasoning with active user settings
         self.manager.run_reasoning(&self.settings.enabled_rules);
@@ -345,6 +391,10 @@ impl DarkstarApp {
         self.source_code_error = None;
         self.source_needs_sync = false;
         self.source_code_buffer.clear();
+        self.source_preview = None;
+        self.source_force_full = false;
+        self.collapsed_types.clear();
+        self.individual_rows_dirty = true;
 
         let event = crate::core::history::DarkstarEvent::Batch(vec![]);
         for plugin in &mut self.plugin_manager.plugins {
@@ -413,10 +463,19 @@ impl DarkstarApp {
             }
         }
 
-        if self.graph_needs_sync {
+        // Invalidate data-derived caches only when the ontology actually changed.
+        // (Previously every selection click set graph_needs_sync and forced all
+        // class/property/individual caches to be rebuilt from the full graph.)
+        if self.manager.revision != self.cache_revision {
+            self.cache_revision = self.manager.revision;
             self.classes_cache_dirty = true;
             self.properties_cache_dirty = true;
             self.individuals_cache_dirty = true;
+            self.graph_needs_sync = true;
+            self.triple_counts = (
+                self.manager.memory.asserted_graph.triples().count(),
+                self.manager.memory.inferred_graph.triples().count(),
+            );
         }
 
         self.render_plugin_guide(ctx);
@@ -497,8 +556,7 @@ impl DarkstarApp {
                     }
                     ui.separator();
                     
-                    let inf_count = self.manager.memory.inferred_graph.triples().count();
-                    let assert_count = self.manager.memory.asserted_graph.triples().count();
+                    let (assert_count, inf_count) = self.triple_counts;
                     ui.label(format!("Triples: {} (+{} inferred)", assert_count, inf_count));
                 });
             });
@@ -650,15 +708,17 @@ impl DarkstarApp {
                         ui.horizontal(|ui| {
                             if ui.button("Confirm").clicked() {
                                 let s_term = InferenceEngine::make_term(&uri);
+                                // Indexed lookups instead of a full scan of the asserted graph.
+                                let mut seen = HashSet::new();
                                 let mut to_delete = Vec::new();
-                                for t in self.manager.memory.asserted_graph.triples().flatten() {
-                                    if s_term == t.s() || s_term == t.o() {
-                                        to_delete.push((crate::rules::extract_str(&t.s()), crate::rules::extract_str(&t.p()), crate::rules::extract_str(&t.o())));
-                                    }
+                                let g = &self.manager.memory.asserted_graph;
+                                for t in g.triples_matching(Some(&s_term), Any, Any).flatten()
+                                    .chain(g.triples_matching(Any, Any, Some(&s_term)).flatten())
+                                {
+                                    let key = (crate::rules::extract_str(&t.s()), crate::rules::extract_str(&t.p()), crate::rules::extract_str(&t.o()));
+                                    if seen.insert(key.clone()) { to_delete.push(key); }
                                 }
-                                for (s, p, o) in to_delete {
-                                    self.manager.remove_assertion(s, p, o);
-                                }
+                                self.manager.remove_assertions_batch(to_delete);
                                 self.selected_uri = None;
                                 self.confirm_delete_uri = None;
                                 self.graph_needs_sync = true;

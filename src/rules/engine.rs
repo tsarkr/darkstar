@@ -34,7 +34,10 @@ impl InferenceEngine {
                 Box::new(super::CaxEqc),
             ],
             rules_equality: vec![
-                Box::new(super::EqRef),
+                // NOTE: eq-ref (x owl:sameAs x for every term) is intentionally not materialized.
+                // It adds one triple per distinct term (hundreds of thousands on large datasets)
+                // and forces every eq-rep rule to rescan the whole graph, while deriving nothing
+                // that other rules need. `super::EqRef` is kept available for explicit use.
                 Box::new(super::EqSym),
                 Box::new(super::EqTrans),
                 Box::new(super::EqRepS),
@@ -109,17 +112,33 @@ impl InferenceEngine {
         }
     }
 
+    /// Full re-materialization: discards previous inferences and saturates from the asserted graph.
     pub fn run_inference(&self, memory: &mut EngineMemory, rules_settings: &crate::core::settings::ReasonerRules) {
-        let start_time = std::time::Instant::now();
-        
-        // Reset inferred graph, inconsistencies, and set main/delta graphs to copy of asserted graph
+        // Reset inferred graph and inconsistencies. `main` needs its own copy because it is
+        // mutated during saturation; the first delta is the asserted graph itself (borrowed,
+        // not cloned), which avoids copying hundreds of thousands of triples.
         memory.inferred_graph = FastGraph::new();
         memory.main_graph = memory.asserted_graph.clone();
-        memory.delta_graph = memory.asserted_graph.clone();
+        memory.delta_graph = FastGraph::new();
         memory.is_consistent = true;
         memory.inconsistencies.clear();
+        self.saturate(memory, rules_settings, None);
+    }
 
-        println!("Darkstar Reasoner: Starting inference on {} triples...", memory.main_graph.triples().count());
+    /// Incremental saturation for addition-only changes (semi-naive evaluation).
+    /// Uses `memory.delta_graph` (triples added since the last reasoning run) as the initial delta.
+    /// Only valid when the previous run reached a consistent fixpoint and nothing was removed.
+    pub fn run_incremental(&self, memory: &mut EngineMemory, rules_settings: &crate::core::settings::ReasonerRules) {
+        let delta = std::mem::take(&mut memory.delta_graph);
+        if delta.triples().next().is_none() {
+            return;
+        }
+        self.saturate(memory, rules_settings, Some(delta));
+    }
+
+    fn saturate(&self, memory: &mut EngineMemory, rules_settings: &crate::core::settings::ReasonerRules, initial_delta: Option<FastGraph>) {
+        let start_time = std::time::Instant::now();
+        println!("Darkstar Reasoner: Starting inference ({})...", if initial_delta.is_some() { "incremental" } else { "full" });
         
         let mut iteration = 1;
         let mut active_rules: Vec<&Box<dyn InferenceRule>> = Vec::new();
@@ -133,15 +152,22 @@ impl InferenceEngine {
         if rules_settings.datatypes { active_rules.extend(self.rules_datatypes.iter()); }
         if rules_settings.schema { active_rules.extend(self.rules_schema.iter()); }
 
+        // `None` => the first delta is the asserted graph (full run).
+        let mut current_delta: Option<FastGraph> = initial_delta;
+
         loop {
             let iter_start = std::time::Instant::now();
-            println!("Iteration {}...", iteration);
             
-            let results: Result<Vec<HashSet<Fact>>, super::Inconsistency> = active_rules.par_iter()
-                .map(|rule| {
-                    rule.apply(&memory.main_graph, &memory.delta_graph)
-                })
-                .collect();
+            let results: Result<Vec<HashSet<Fact>>, super::Inconsistency> = {
+                let main = &memory.main_graph;
+                let delta = match &current_delta {
+                    Some(d) => d,
+                    None => &memory.asserted_graph,
+                };
+                active_rules.par_iter()
+                    .map(|rule| rule.apply(main, delta))
+                    .collect()
+            };
             
             let new_facts: HashSet<Fact> = match results {
                 Ok(fact_sets) => {
@@ -172,7 +198,7 @@ impl InferenceEngine {
                 }
             }
             
-            memory.delta_graph = next_delta;
+            current_delta = Some(next_delta);
             println!("Iteration {} took {:?}, produced {} new facts.", iteration, iter_start.elapsed(), truly_new_count);
             
             if truly_new_count == 0 {
@@ -186,5 +212,6 @@ impl InferenceEngine {
                 break;
             }
         }
+        memory.delta_graph = FastGraph::new();
     }
 }

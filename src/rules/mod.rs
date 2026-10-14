@@ -86,6 +86,37 @@ fn get_rdf_list<T: Term>(main: &DarkstarGraph, head: &T) -> Vec<String> {
     elements
 }
 
+#[inline]
+fn iri(s: &'static str) -> SimpleTerm<'static> {
+    SimpleTerm::Iri(IriRef::new_unchecked(s.into()))
+}
+
+/// Builds a `subject -> [objects]` lookup table for all triples with predicate `pred`.
+/// Schema-level tables (subClassOf, domain, range, ...) are tiny compared to instance data,
+/// so rules use them to query the delta only for relevant predicates/classes
+/// instead of scanning every delta triple.
+fn pred_map(g: &DarkstarGraph, pred: &SimpleTerm<'_>) -> HashMap<String, Vec<String>> {
+    let mut m: HashMap<String, Vec<String>> = HashMap::new();
+    for t in g.triples_matching(Any, Some(pred), Any).flatten() {
+        m.entry(extract_str(&t.s())).or_default().push(extract_str(&t.o()));
+    }
+    m
+}
+
+/// Builds an `object -> [subjects]` lookup table for all triples with predicate `pred`.
+fn pred_map_inv(g: &DarkstarGraph, pred: &SimpleTerm<'_>) -> HashMap<String, Vec<String>> {
+    let mut m: HashMap<String, Vec<String>> = HashMap::new();
+    for t in g.triples_matching(Any, Some(pred), Any).flatten() {
+        m.entry(extract_str(&t.o())).or_default().push(extract_str(&t.s()));
+    }
+    m
+}
+
+#[inline]
+fn has_pred(g: &DarkstarGraph, pred: &SimpleTerm<'_>) -> bool {
+    g.triples_matching(Any, Some(pred), Any).next().is_some()
+}
+
 pub trait InferenceRule: Sync + Send {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency>;
 }
@@ -95,21 +126,26 @@ pub struct CaxSco;
 impl InferenceRule for CaxSco {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
         let mut new_facts = HashSet::new();
-        let rdf_type = SimpleTerm::Iri(IriRef::new_unchecked(RDF_TYPE.into()));
-        let rdfs_subclass_of = SimpleTerm::Iri(IriRef::new_unchecked(RDFS_SUBCLASS_OF.into()));
+        let rdf_type = iri(RDF_TYPE);
+        let rdfs_subclass_of = iri(RDFS_SUBCLASS_OF);
 
-        for t in delta.triples().flatten() {
-            let p = t.p();
-            if *p == rdf_type {
+        // (x type c1) in delta, (c1 subClassOf c2) in main
+        let supers = pred_map(main, &rdfs_subclass_of);
+        for (c1, sups) in &supers {
+            let c1_term = InferenceEngine::make_term(c1);
+            for t in delta.triples_matching(Any, Some(&rdf_type), Some(&c1_term)).flatten() {
                 let x = extract_str(&t.s());
-                for t2 in main.triples_matching(Some(t.o()), Some(&rdfs_subclass_of), Any).flatten() {
-                    new_facts.insert(Fact { s: x.clone(), p: RDF_TYPE.to_string(), o: extract_str(&t2.o()) });
+                for c2 in sups {
+                    new_facts.insert(Fact { s: x.clone(), p: RDF_TYPE.to_string(), o: c2.clone() });
                 }
-            } else if *p == rdfs_subclass_of {
-                let c2 = extract_str(&t.o());
-                for t2 in main.triples_matching(Any, Some(&rdf_type), Some(t.s())).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t2.s()), p: RDF_TYPE.to_string(), o: c2.clone() });
-                }
+            }
+        }
+
+        // (c1 subClassOf c2) in delta, (x type c1) in main
+        for t in delta.triples_matching(Any, Some(&rdfs_subclass_of), Any).flatten() {
+            let c2 = extract_str(&t.o());
+            for t2 in main.triples_matching(Any, Some(&rdf_type), Some(t.s())).flatten() {
+                new_facts.insert(Fact { s: extract_str(&t2.s()), p: RDF_TYPE.to_string(), o: c2.clone() });
             }
         }
         Ok(new_facts)
@@ -121,18 +157,26 @@ pub struct PrpSpo1;
 impl InferenceRule for PrpSpo1 {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
         let mut new_facts = HashSet::new();
-        let rdfs_subproperty_of = SimpleTerm::Iri(IriRef::new_unchecked(RDFS_SUBPROPERTY_OF.into()));
+        let rdfs_subproperty_of = iri(RDFS_SUBPROPERTY_OF);
+        let self_key = format!("i:{}", RDFS_SUBPROPERTY_OF);
 
-        for t in delta.triples().flatten() {
-            let p = t.p();
-            if *p == rdfs_subproperty_of {
-                let p2 = extract_str(&t.o());
-                for t2 in main.triples_matching(Any, Some(t.s()), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t2.s()), p: p2.clone(), o: extract_str(&t2.o()) });
-                }
-            } else {
-                for t2 in main.triples_matching(Some(p), Some(&rdfs_subproperty_of), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t.s()), p: extract_str(&t2.o()), o: extract_str(&t.o()) });
+        // (p1 subPropertyOf p2) in delta, (x p1 y) in main
+        for t in delta.triples_matching(Any, Some(&rdfs_subproperty_of), Any).flatten() {
+            let p2 = extract_str(&t.o());
+            for t2 in main.triples_matching(Any, Some(t.s()), Any).flatten() {
+                new_facts.insert(Fact { s: extract_str(&t2.s()), p: p2.clone(), o: extract_str(&t2.o()) });
+            }
+        }
+
+        // (x p1 y) in delta, (p1 subPropertyOf p2) in main
+        for (p1, sups) in &pred_map(main, &rdfs_subproperty_of) {
+            if *p1 == self_key { continue; }
+            let p1_term = InferenceEngine::make_term(p1);
+            for t in delta.triples_matching(Any, Some(&p1_term), Any).flatten() {
+                let s = extract_str(&t.s());
+                let o = extract_str(&t.o());
+                for p2 in sups {
+                    new_facts.insert(Fact { s: s.clone(), p: p2.clone(), o: o.clone() });
                 }
             }
         }
@@ -171,16 +215,25 @@ pub struct PrpDom;
 impl InferenceRule for PrpDom {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
         let mut new_facts = HashSet::new();
-        let rdfs_domain = SimpleTerm::Iri(IriRef::new_unchecked(RDFS_DOMAIN.into()));
-        for t in delta.triples().flatten() {
-            if *t.p() == rdfs_domain {
-                let c = extract_str(&t.o());
-                for t2 in main.triples_matching(Any, Some(t.s()), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t2.s()), p: RDF_TYPE.to_string(), o: c.clone() });
-                }
-            } else {
-                for t2 in main.triples_matching(Some(t.p()), Some(&rdfs_domain), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t.s()), p: RDF_TYPE.to_string(), o: extract_str(&t2.o()) });
+        let rdfs_domain = iri(RDFS_DOMAIN);
+        let self_key = format!("i:{}", RDFS_DOMAIN);
+
+        // (p domain c) in delta, (x p y) in main
+        for t in delta.triples_matching(Any, Some(&rdfs_domain), Any).flatten() {
+            let c = extract_str(&t.o());
+            for t2 in main.triples_matching(Any, Some(t.s()), Any).flatten() {
+                new_facts.insert(Fact { s: extract_str(&t2.s()), p: RDF_TYPE.to_string(), o: c.clone() });
+            }
+        }
+
+        // (x p y) in delta, (p domain c) in main
+        for (p, classes) in &pred_map(main, &rdfs_domain) {
+            if *p == self_key { continue; }
+            let p_term = InferenceEngine::make_term(p);
+            for t in delta.triples_matching(Any, Some(&p_term), Any).flatten() {
+                let s = extract_str(&t.s());
+                for c in classes {
+                    new_facts.insert(Fact { s: s.clone(), p: RDF_TYPE.to_string(), o: c.clone() });
                 }
             }
         }
@@ -192,16 +245,25 @@ pub struct PrpRng;
 impl InferenceRule for PrpRng {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
         let mut new_facts = HashSet::new();
-        let rdfs_range = SimpleTerm::Iri(IriRef::new_unchecked(RDFS_RANGE.into()));
-        for t in delta.triples().flatten() {
-            if *t.p() == rdfs_range {
-                let c = extract_str(&t.o());
-                for t2 in main.triples_matching(Any, Some(t.s()), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t2.o()), p: RDF_TYPE.to_string(), o: c.clone() });
-                }
-            } else {
-                for t2 in main.triples_matching(Some(t.p()), Some(&rdfs_range), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t.o()), p: RDF_TYPE.to_string(), o: extract_str(&t2.o()) });
+        let rdfs_range = iri(RDFS_RANGE);
+        let self_key = format!("i:{}", RDFS_RANGE);
+
+        // (p range c) in delta, (x p y) in main
+        for t in delta.triples_matching(Any, Some(&rdfs_range), Any).flatten() {
+            let c = extract_str(&t.o());
+            for t2 in main.triples_matching(Any, Some(t.s()), Any).flatten() {
+                new_facts.insert(Fact { s: extract_str(&t2.o()), p: RDF_TYPE.to_string(), o: c.clone() });
+            }
+        }
+
+        // (x p y) in delta, (p range c) in main
+        for (p, classes) in &pred_map(main, &rdfs_range) {
+            if *p == self_key { continue; }
+            let p_term = InferenceEngine::make_term(p);
+            for t in delta.triples_matching(Any, Some(&p_term), Any).flatten() {
+                let o = extract_str(&t.o());
+                for c in classes {
+                    new_facts.insert(Fact { s: o.clone(), p: RDF_TYPE.to_string(), o: c.clone() });
                 }
             }
         }
@@ -213,23 +275,40 @@ pub struct PrpInv;
 impl InferenceRule for PrpInv {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
         let mut new_facts = HashSet::new();
-        let inverse_of = SimpleTerm::Iri(IriRef::new_unchecked(OWL_INVERSE_OF.into()));
-        for t in delta.triples().flatten() {
-            if *t.p() == inverse_of {
-                let p1 = extract_str(&t.s());
-                let p2 = extract_str(&t.o());
-                for t2 in main.triples_matching(Any, Some(t.s()), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t2.o()), p: p2.clone(), o: extract_str(&t2.s()) });
+        let inverse_of = iri(OWL_INVERSE_OF);
+        let self_key = format!("i:{}", OWL_INVERSE_OF);
+
+        // (p1 inverseOf p2) in delta
+        for t in delta.triples_matching(Any, Some(&inverse_of), Any).flatten() {
+            let p1 = extract_str(&t.s());
+            let p2 = extract_str(&t.o());
+            for t2 in main.triples_matching(Any, Some(t.s()), Any).flatten() {
+                new_facts.insert(Fact { s: extract_str(&t2.o()), p: p2.clone(), o: extract_str(&t2.s()) });
+            }
+            for t2 in main.triples_matching(Any, Some(t.o()), Any).flatten() {
+                new_facts.insert(Fact { s: extract_str(&t2.o()), p: p1.clone(), o: extract_str(&t2.s()) });
+            }
+        }
+
+        // (x p y) in delta, (p inverseOf q) in main  =>  (y q x)
+        for (p, qs) in &pred_map(main, &inverse_of) {
+            if *p == self_key { continue; }
+            let p_term = InferenceEngine::make_term(p);
+            for t in delta.triples_matching(Any, Some(&p_term), Any).flatten() {
+                let (s, o) = (extract_str(&t.s()), extract_str(&t.o()));
+                for q in qs {
+                    new_facts.insert(Fact { s: o.clone(), p: q.clone(), o: s.clone() });
                 }
-                for t2 in main.triples_matching(Any, Some(t.o()), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t2.o()), p: p1.clone(), o: extract_str(&t2.s()) });
-                }
-            } else {
-                for t2 in main.triples_matching(Some(t.p()), Some(&inverse_of), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t.o()), p: extract_str(&t2.o()), o: extract_str(&t.s()) });
-                }
-                for t2 in main.triples_matching(Any, Some(&inverse_of), Some(t.p())).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t.o()), p: extract_str(&t2.s()), o: extract_str(&t.s()) });
+            }
+        }
+        // (x q y) in delta, (p inverseOf q) in main  =>  (y p x)
+        for (q, ps) in &pred_map_inv(main, &inverse_of) {
+            if *q == self_key { continue; }
+            let q_term = InferenceEngine::make_term(q);
+            for t in delta.triples_matching(Any, Some(&q_term), Any).flatten() {
+                let (s, o) = (extract_str(&t.s()), extract_str(&t.o()));
+                for p in ps {
+                    new_facts.insert(Fact { s: o.clone(), p: p.clone(), o: s.clone() });
                 }
             }
         }
@@ -241,16 +320,24 @@ pub struct EqRepS;
 impl InferenceRule for EqRepS {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
         let mut new_facts = HashSet::new();
-        let same_as = SimpleTerm::Iri(IriRef::new_unchecked(OWL_SAME_AS.into()));
-        for t in delta.triples().flatten() {
-            if *t.p() == same_as {
-                let s2 = extract_str(&t.o());
-                for t2 in main.triples_matching(Some(t.s()), Any, Any).flatten() {
-                    new_facts.insert(Fact { s: s2.clone(), p: extract_str(&t2.p()), o: extract_str(&t2.o()) });
-                }
-            } else {
-                for t2 in main.triples_matching(Some(t.s()), Some(&same_as), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t2.o()), p: extract_str(&t.p()), o: extract_str(&t.o()) });
+        let same_as = iri(OWL_SAME_AS);
+
+        // (s sameAs s2) in delta, (s p o) in main
+        for t in delta.triples_matching(Any, Some(&same_as), Any).flatten() {
+            let s2 = extract_str(&t.o());
+            for t2 in main.triples_matching(Some(t.s()), Any, Any).flatten() {
+                new_facts.insert(Fact { s: s2.clone(), p: extract_str(&t2.p()), o: extract_str(&t2.o()) });
+            }
+        }
+
+        // (s p o) in delta, (s sameAs s2) in main
+        for (x, ys) in &pred_map(main, &same_as) {
+            let x_term = InferenceEngine::make_term(x);
+            for t in delta.triples_matching(Some(&x_term), Any, Any).flatten() {
+                if *t.p() == same_as { continue; }
+                let (p, o) = (extract_str(&t.p()), extract_str(&t.o()));
+                for y in ys {
+                    new_facts.insert(Fact { s: y.clone(), p: p.clone(), o: o.clone() });
                 }
             }
         }
@@ -264,6 +351,7 @@ impl InferenceRule for CaxEqc {
         let mut new_facts = HashSet::new();
         let rdf_type = SimpleTerm::Iri(IriRef::new_unchecked(RDF_TYPE.into()));
         let owl_equiv = SimpleTerm::Iri(IriRef::new_unchecked(OWL_EQUIVALENT_CLASS.into()));
+        if !has_pred(main, &owl_equiv) { return Ok(new_facts); }
         for t in delta.triples().flatten() {
             if *t.p() == owl_equiv {
                 let c1 = extract_str(&t.s());
@@ -339,16 +427,25 @@ pub struct EqRepP;
 impl InferenceRule for EqRepP {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
         let mut new_facts = HashSet::new();
-        let same_as = SimpleTerm::Iri(IriRef::new_unchecked(OWL_SAME_AS.into()));
-        for t in delta.triples().flatten() {
-            if *t.p() == same_as {
-                let q = extract_str(&t.o());
-                for t2 in main.triples_matching(Any, Some(t.s()), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t2.s()), p: q.clone(), o: extract_str(&t2.o()) });
-                }
-            } else {
-                for t2 in main.triples_matching(Some(t.p()), Some(&same_as), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t.s()), p: extract_str(&t2.o()), o: extract_str(&t.o()) });
+        let same_as = iri(OWL_SAME_AS);
+        let same_as_key = format!("i:{}", OWL_SAME_AS);
+
+        // (p sameAs q) in delta, (s p o) in main
+        for t in delta.triples_matching(Any, Some(&same_as), Any).flatten() {
+            let q = extract_str(&t.o());
+            for t2 in main.triples_matching(Any, Some(t.s()), Any).flatten() {
+                new_facts.insert(Fact { s: extract_str(&t2.s()), p: q.clone(), o: extract_str(&t2.o()) });
+            }
+        }
+
+        // (s p o) in delta, (p sameAs q) in main
+        for (x, ys) in &pred_map(main, &same_as) {
+            if *x == same_as_key { continue; }
+            let x_term = InferenceEngine::make_term(x);
+            for t in delta.triples_matching(Any, Some(&x_term), Any).flatten() {
+                let (s, o) = (extract_str(&t.s()), extract_str(&t.o()));
+                for y in ys {
+                    new_facts.insert(Fact { s: s.clone(), p: y.clone(), o: o.clone() });
                 }
             }
         }
@@ -360,16 +457,24 @@ pub struct EqRepO;
 impl InferenceRule for EqRepO {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
         let mut new_facts = HashSet::new();
-        let same_as = SimpleTerm::Iri(IriRef::new_unchecked(OWL_SAME_AS.into()));
-        for t in delta.triples().flatten() {
-            if *t.p() == same_as {
-                let o_prime = extract_str(&t.o());
-                for t2 in main.triples_matching(Any, Any, Some(t.s())).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t2.s()), p: extract_str(&t2.p()), o: o_prime.clone() });
-                }
-            } else {
-                for t2 in main.triples_matching(Some(t.o()), Some(&same_as), Any).flatten() {
-                    new_facts.insert(Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t2.o()) });
+        let same_as = iri(OWL_SAME_AS);
+
+        // (o sameAs o2) in delta, (s p o) in main
+        for t in delta.triples_matching(Any, Some(&same_as), Any).flatten() {
+            let o_prime = extract_str(&t.o());
+            for t2 in main.triples_matching(Any, Any, Some(t.s())).flatten() {
+                new_facts.insert(Fact { s: extract_str(&t2.s()), p: extract_str(&t2.p()), o: o_prime.clone() });
+            }
+        }
+
+        // (s p o) in delta, (o sameAs o2) in main
+        for (x, ys) in &pred_map(main, &same_as) {
+            let x_term = InferenceEngine::make_term(x);
+            for t in delta.triples_matching(Any, Any, Some(&x_term)).flatten() {
+                if *t.p() == same_as { continue; }
+                let (s, p) = (extract_str(&t.s()), extract_str(&t.p()));
+                for y in ys {
+                    new_facts.insert(Fact { s: s.clone(), p: p.clone(), o: y.clone() });
                 }
             }
         }
@@ -380,15 +485,16 @@ impl InferenceRule for EqRepO {
 pub struct PrpIrp;
 impl InferenceRule for PrpIrp {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
-        let rdf_type = SimpleTerm::Iri(IriRef::new_unchecked(RDF_TYPE.into()));
-        let irreflexive = SimpleTerm::Iri(IriRef::new_unchecked(OWL_IRREFLEXIVE_PROPERTY.into()));
-        for t in delta.triples().flatten() {
-            let p = t.p();
-            if main.contains(p, &rdf_type, &irreflexive).unwrap_or(false) && t.s() == t.o() {
-                return Err(Inconsistency {
-                    rule_name: "prp-irp".to_string(),
-                    conflicting_triples: vec![Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t.o()) }],
-                });
+        let rdf_type = iri(RDF_TYPE);
+        let irreflexive = iri(OWL_IRREFLEXIVE_PROPERTY);
+        for tp in main.triples_matching(Any, Some(&rdf_type), Some(&irreflexive)).flatten() {
+            for t in delta.triples_matching(Any, Some(tp.s()), Any).flatten() {
+                if t.s() == t.o() {
+                    return Err(Inconsistency {
+                        rule_name: "prp-irp".to_string(),
+                        conflicting_triples: vec![Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t.o()) }],
+                    });
+                }
             }
         }
         Ok(HashSet::new())
@@ -398,14 +504,16 @@ impl InferenceRule for PrpIrp {
 pub struct PrpAsyp;
 impl InferenceRule for PrpAsyp {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
-        let rdf_type = SimpleTerm::Iri(IriRef::new_unchecked(RDF_TYPE.into()));
-        let asymmetric = SimpleTerm::Iri(IriRef::new_unchecked(OWL_ASYMMETRIC_PROPERTY.into()));
-        for t in delta.triples().flatten() {
-            if main.contains(t.p(), &rdf_type, &asymmetric).unwrap_or(false) && main.contains(t.o(), t.p(), t.s()).unwrap_or(false) {
-                return Err(Inconsistency {
-                    rule_name: "prp-asyp".to_string(),
-                    conflicting_triples: vec![Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t.o()) }],
-                });
+        let rdf_type = iri(RDF_TYPE);
+        let asymmetric = iri(OWL_ASYMMETRIC_PROPERTY);
+        for tp in main.triples_matching(Any, Some(&rdf_type), Some(&asymmetric)).flatten() {
+            for t in delta.triples_matching(Any, Some(tp.s()), Any).flatten() {
+                if main.contains(t.o(), t.p(), t.s()).unwrap_or(false) {
+                    return Err(Inconsistency {
+                        rule_name: "prp-asyp".to_string(),
+                        conflicting_triples: vec![Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t.o()) }],
+                    });
+                }
             }
         }
         Ok(HashSet::new())
@@ -494,6 +602,7 @@ impl InferenceRule for ClsInt2 {
         let mut new_facts = HashSet::new();
         let rdf_type = SimpleTerm::Iri(IriRef::new_unchecked(RDF_TYPE.into()));
         let intersection_of = SimpleTerm::Iri(IriRef::new_unchecked(OWL_INTERSECTION_OF.into()));
+        if !has_pred(main, &intersection_of) { return Ok(new_facts); }
         for t in delta.triples_matching(Any, Some(&rdf_type), Any).flatten() {
             for t_int in main.triples_matching(Some(t.o()), Some(&intersection_of), Any).flatten() {
                 let list = get_rdf_list(main, &t_int.o());
@@ -511,12 +620,22 @@ impl InferenceRule for ClsUni {
         let mut new_facts = HashSet::new();
         let rdf_type = SimpleTerm::Iri(IriRef::new_unchecked(RDF_TYPE.into()));
         let union_of = SimpleTerm::Iri(IriRef::new_unchecked(OWL_UNION_OF.into()));
-        for t in delta.triples_matching(Any, Some(&rdf_type), Any).flatten() {
-            let ci_str = extract_str(&t.o());
-            for t_uni in main.triples_matching(Any, Some(&union_of), Any).flatten() {
-                let list = get_rdf_list(main, &t_uni.o());
-                if list.contains(&ci_str) {
-                    new_facts.insert(Fact { s: extract_str(&t.s()), p: RDF_TYPE.to_string(), o: extract_str(&t_uni.s()) });
+
+        // member class -> [union classes containing it] (resolved once per iteration)
+        let mut member_of: HashMap<String, Vec<String>> = HashMap::new();
+        for t_uni in main.triples_matching(Any, Some(&union_of), Any).flatten() {
+            let union_class = extract_str(&t_uni.s());
+            for member in get_rdf_list(main, &t_uni.o()) {
+                member_of.entry(member).or_default().push(union_class.clone());
+            }
+        }
+
+        for (member, unions) in &member_of {
+            let member_term = InferenceEngine::make_term(member);
+            for t in delta.triples_matching(Any, Some(&rdf_type), Some(&member_term)).flatten() {
+                let x = extract_str(&t.s());
+                for u in unions {
+                    new_facts.insert(Fact { s: x.clone(), p: RDF_TYPE.to_string(), o: u.clone() });
                 }
             }
         }
@@ -655,6 +774,7 @@ impl InferenceRule for ClsDj {
     fn apply(&self, main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
         let disjoint = SimpleTerm::Iri(IriRef::new_unchecked(OWL_DISJOINT_WITH.into()));
         let rdf_type = SimpleTerm::Iri(IriRef::new_unchecked(RDF_TYPE.into()));
+        if !has_pred(main, &disjoint) { return Ok(HashSet::new()); }
         for t in delta.triples_matching(Any, Some(&rdf_type), Any).flatten() {
             let x = t.s();
             let c = t.o();

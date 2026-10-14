@@ -5,9 +5,28 @@ use sophia::api::graph::Graph;
 use sophia::api::prelude::*;
 use sophia::api::term::matcher::Any;
 
+/// Rows rendered per relation section (and added per "show more" click). Hub entities
+/// (e.g. a class with 100k+ instances) would otherwise lay out every edge on every frame.
+pub const RELATION_ROWS_STEP: usize = 200;
+
+/// "Show more" row; returns true when clicked.
+fn show_more_button(ui: &mut egui::Ui, shown: usize) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(format!("… {}개 표시 중", shown)).size(10.0).weak());
+        ui.button(egui::RichText::new(format!("➕ {}개 더 보기", RELATION_ROWS_STEP)).size(10.0)).clicked()
+    }).inner
+}
+
 impl DarkstarApp {
     pub fn render_entity_editor_tab(&mut self, ui: &mut egui::Ui) {
         let i = self.i18n();
+        // Reset "show more" limits when a different entity is selected.
+        if self.relation_limits_uri != self.selected_uri {
+            self.relation_limits_uri = self.selected_uri.clone();
+            self.relation_limits = [RELATION_ROWS_STEP; 3];
+        }
+        let limits = self.relation_limits;
+        let mut more_section: Option<usize> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new(i.property_editor).size(11.0).strong());
@@ -113,9 +132,15 @@ impl DarkstarApp {
                     
                     let s_term = InferenceEngine::make_term(uri);
                     
-                    // Show Asserted
-                    for t in self.manager.memory.asserted_graph.triples().flatten() {
-                        if s_term == t.s() {
+                    // Show Asserted (indexed by subject instead of scanning the whole graph)
+                    let mut shown = 0usize;
+                    for t in self.manager.memory.asserted_graph.triples_matching(Some(&s_term), Any, Any).flatten() {
+                        shown += 1;
+                        if shown > limits[0] {
+                            if show_more_button(ui, limits[0]) { more_section = Some(0); }
+                            break;
+                        }
+                        {
                             let p = crate::rules::extract_str(&t.p());
                             let o = crate::rules::extract_str(&t.o());
                             ui.horizontal(|ui| {
@@ -165,8 +190,14 @@ impl DarkstarApp {
                     
                     // Show Inferred
                     ui.add_space(5.0);
-                    for t in self.manager.memory.inferred_graph.triples().flatten() {
-                        if s_term == t.s() {
+                    let mut shown = 0usize;
+                    for t in self.manager.memory.inferred_graph.triples_matching(Some(&s_term), Any, Any).flatten() {
+                        shown += 1;
+                        if shown > limits[1] {
+                            if show_more_button(ui, limits[1]) { more_section = Some(1); }
+                            break;
+                        }
+                        {
                             if !self.manager.memory.asserted_graph.contains(t.s(), t.p(), t.o()).unwrap() {
                                 let p = crate::rules::extract_str(&t.p());
                                 let o = crate::rules::extract_str(&t.o());
@@ -182,9 +213,15 @@ impl DarkstarApp {
                     ui.add_space(10.0);
                     ui.separator();
                     ui.label(egui::RichText::new("Incoming Relations (as Object)").size(11.0).strong());
+                    let mut shown = 0usize;
                     for t in self.manager.memory.asserted_graph.triples_matching(Any, Any, Some(&s_term)).flatten().chain(
                         self.manager.memory.inferred_graph.triples_matching(Any, Any, Some(&s_term)).flatten()
                     ) {
+                        shown += 1;
+                        if shown > limits[2] {
+                            if show_more_button(ui, limits[2]) { more_section = Some(2); }
+                            break;
+                        }
                         let s = crate::rules::extract_str(&t.s());
                         let p = crate::rules::extract_str(&t.p());
                         ui.horizontal(|ui| {
@@ -214,5 +251,8 @@ impl DarkstarApp {
                 }
             });
         });
+        if let Some(k) = more_section {
+            self.relation_limits[k] += RELATION_ROWS_STEP;
+        }
     }
 }

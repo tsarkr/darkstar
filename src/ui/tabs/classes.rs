@@ -56,6 +56,7 @@ impl DarkstarApp {
         let mut roots: Vec<_> = all_classes.into_iter().filter(|c| !has_parent.contains(c)).collect();
         roots.sort();
         
+        for children in children_map.values_mut() { children.sort_unstable(); children.dedup(); }
         self.class_roots = roots;
         self.class_children = children_map;
         self.classes_cache_dirty = false;
@@ -63,6 +64,7 @@ impl DarkstarApp {
 
     pub fn render_class_hierarchy(&mut self, ui: &mut egui::Ui) {
         self.rebuild_classes_cache();
+        if !self.search_query.is_empty() { self.ensure_label_index(); }
         
         let roots = self.class_roots.clone();
         let children_map = std::mem::take(&mut self.class_children);
@@ -83,7 +85,7 @@ impl DarkstarApp {
         let label = Self::get_label(uri);
         let children = children_map.get(uri);
         let is_selected = self.selected_uri.as_deref() == Some(uri);
-        let is_match = !query.is_empty() && (uri.to_lowercase().contains(&query) || label.to_lowercase().contains(&query));
+        let is_match = !query.is_empty() && self.matches_search(uri, &label, &query);
         
         let text = if is_match {
             egui::RichText::new(label).color(egui::Color32::from_rgb(255, 165, 0)).strong()
@@ -99,9 +101,8 @@ impl DarkstarApp {
                     self.selected_uri = Some(uri.to_string());
                     self.graph_needs_sync = true;
                 }
-                let mut sorted_children = children.clone();
-                sorted_children.sort();
-                for child in sorted_children { self.render_hierarchy_node(ui, &child, children_map); }
+                // children are pre-sorted when the cache is built
+                for child in children { self.render_hierarchy_node(ui, child, children_map); }
             });
         } else {
             if ui.selectable_label(is_selected, text).clicked() {
@@ -112,7 +113,7 @@ impl DarkstarApp {
     }
 
     fn matches_search_recursive(&self, uri: &str, children_map: &HashMap<String, Vec<String>>, query: &str) -> bool {
-        if uri.to_lowercase().contains(query) || Self::get_label(uri).to_lowercase().contains(query) {
+        if self.matches_search(uri, &Self::get_label(uri), query) {
             return true;
         }
         if let Some(children) = children_map.get(uri) {

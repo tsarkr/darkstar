@@ -11,6 +11,20 @@ pub struct HealthCheckerPlugin {
     isolated_nodes: Vec<String>,
     missing_labels: Vec<String>,
     empty_classes: Vec<String>,
+    /// Set by events; the full scan runs lazily when the tab is shown.
+    dirty: bool,
+}
+
+/// Max entries rendered per section (lists can contain 100k+ entities).
+const MAX_LIST_ROWS: usize = 500;
+
+fn render_capped(ui: &mut egui::Ui, items: &[String]) {
+    for node in items.iter().take(MAX_LIST_ROWS) {
+        ui.label(node);
+    }
+    if items.len() > MAX_LIST_ROWS {
+        ui.label(egui::RichText::new(format!("… (+{})", items.len() - MAX_LIST_ROWS)).weak());
+    }
 }
 
 impl HealthCheckerPlugin {
@@ -19,6 +33,7 @@ impl HealthCheckerPlugin {
             isolated_nodes: Vec::new(),
             missing_labels: Vec::new(),
             empty_classes: Vec::new(),
+            dirty: true,
         }
     }
 
@@ -39,29 +54,30 @@ impl HealthCheckerPlugin {
 
         for t in manager.memory.main_graph.triples().flatten() {
             let s = crate::rules::extract_str(&t.s());
-            let p = crate::rules::extract_str(&t.p());
-            let o = crate::rules::extract_str(&t.o());
+            let o_is_literal = t.o().kind() == sophia::api::term::TermKind::Literal;
+            let is_type = rdf_type == t.p();
+            // Literal objects never become entities, so skip allocating a string for them
+            // unless it is needed (it never is for literals).
+            let o = if o_is_literal { String::new() } else { crate::rules::extract_str(&t.o()) };
 
-            if !s.starts_with("l:") { all_entities.insert(s.clone()); }
-            if !o.starts_with("l:") { all_entities.insert(o.clone()); }
+            if !s.starts_with("l:") && !all_entities.contains(&s) { all_entities.insert(s.clone()); }
+            if !o_is_literal && !all_entities.contains(&o) { all_entities.insert(o.clone()); }
 
             // Check connections (excluding rdf:type)
-            if p != "i:http://www.w3.org/1999/02/22-rdf-syntax-ns#type" {
-                connected_entities.insert(s.clone());
-                if !o.starts_with("l:") { connected_entities.insert(o.clone()); }
+            if !is_type {
+                if !connected_entities.contains(&s) { connected_entities.insert(s.clone()); }
+                if !o_is_literal && !connected_entities.contains(&o) { connected_entities.insert(o.clone()); }
             }
 
             // Check labels
-            if rdf_type == t.p() && owl_class == t.o() {
+            if is_type && owl_class == t.o() {
                 classes.push(s.clone());
             }
 
             if rdfs_label == t.p() {
-                has_label.insert(s.clone());
-            }
-
-            if rdf_type == t.p() {
-                class_with_instances.insert(o.clone());
+                has_label.insert(s);
+            } else if is_type && !o_is_literal {
+                class_with_instances.insert(o);
             }
         }
 
@@ -99,11 +115,15 @@ impl DarkstarPlugin for HealthCheckerPlugin {
     }
     fn version(&self) -> &str { "1.0.0" }
 
-    fn init(&mut self, manager: &mut DarkstarManager) {
-        self.run_check(manager);
+    fn init(&mut self, _manager: &mut DarkstarManager) {
+        self.dirty = true;
     }
 
     fn render_tab(&mut self, ui: &mut egui::Ui, manager: &mut DarkstarManager, l10n: &L10n) {
+        if self.dirty {
+            self.run_check(manager);
+            self.dirty = false;
+        }
         ui.heading(format!("🩺 {}", l10n.health_report));
         ui.add_space(10.0);
 
@@ -115,26 +135,21 @@ impl DarkstarPlugin for HealthCheckerPlugin {
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.collapsing(format!("⚠️ {} ({})", l10n.isolated_entities, self.isolated_nodes.len()), |ui| {
-                for node in &self.isolated_nodes {
-                    ui.label(node);
-                }
+                render_capped(ui, &self.isolated_nodes);
             });
 
             ui.collapsing(format!("📝 {} ({})", l10n.missing_labels, self.missing_labels.len()), |ui| {
-                for node in &self.missing_labels {
-                    ui.label(node);
-                }
+                render_capped(ui, &self.missing_labels);
             });
 
             ui.collapsing(format!("📁 {} ({})", l10n.empty_classes, self.empty_classes.len()), |ui| {
-                for class_uri in &self.empty_classes {
-                    ui.label(class_uri);
-                }
+                render_capped(ui, &self.empty_classes);
             });
         });
     }
 
-    fn handle_event(&mut self, _event: &DarkstarEvent, manager: &mut DarkstarManager) {
-        self.run_check(manager);
+    fn handle_event(&mut self, _event: &DarkstarEvent, _manager: &mut DarkstarManager) {
+        // Defer the full scan until the tab is shown.
+        self.dirty = true;
     }
 }

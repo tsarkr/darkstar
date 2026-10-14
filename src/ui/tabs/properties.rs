@@ -58,6 +58,7 @@ impl DarkstarApp {
             }
             let mut roots: Vec<_> = all_props.into_iter().filter(|p| !has_parent.contains(p)).collect();
             roots.sort();
+            for children in children_map.values_mut() { children.sort_unstable(); children.dedup(); }
             self.object_prop_roots = roots;
             self.object_prop_children = children_map;
         }
@@ -84,6 +85,7 @@ impl DarkstarApp {
             }
             let mut roots: Vec<_> = all_props.into_iter().filter(|p| !has_parent.contains(p)).collect();
             roots.sort();
+            for children in children_map.values_mut() { children.sort_unstable(); children.dedup(); }
             self.datatype_prop_roots = roots;
             self.datatype_prop_children = children_map;
         }
@@ -93,6 +95,7 @@ impl DarkstarApp {
 
     pub fn render_property_hierarchy(&mut self, ui: &mut egui::Ui, filter_object: bool) {
         self.rebuild_properties_cache();
+        if !self.search_query.is_empty() { self.ensure_label_index(); }
 
         if filter_object {
             let roots = self.object_prop_roots.clone();
