@@ -23,6 +23,8 @@ impl<'a> TabViewer for DarkstarTabViewer<'a> {
             DarkstarTab::SourceEditor => i.source_editor.into(),
             DarkstarTab::EntityEditor => i.property_editor.into(),
             DarkstarTab::History => i.history.into(),
+            DarkstarTab::Sparql => "SPARQL".into(),
+            DarkstarTab::DlQuery => "DL Query".into(),
             DarkstarTab::Plugin(name) => {
                 if let Some(plugin) = self.app.plugin_manager.plugins.iter().find(|p| p.name(&L10n::get(Language::English)) == *name) {
                     plugin.name(&i).into()
@@ -51,6 +53,8 @@ impl<'a> TabViewer for DarkstarTabViewer<'a> {
             DarkstarTab::History => {
                 self.app.render_history_tab(ui);
             }
+            DarkstarTab::Sparql => self.app.render_sparql_tab(ui),
+            DarkstarTab::DlQuery => self.app.render_dl_query_tab(ui),
             DarkstarTab::Plugin(name) => {
                 let i = self.app.i18n();
                 if let Some(plugin) = self.app.plugin_manager.plugins.iter_mut().find(|p| p.name(&L10n::get(Language::English)) == *name) {

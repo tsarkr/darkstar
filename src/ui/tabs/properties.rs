@@ -32,64 +32,13 @@ impl DarkstarApp {
 
     pub fn rebuild_properties_cache(&mut self) {
         if !self.properties_cache_dirty { return; }
-        use sophia::api::term::matcher::Any;
-        let rdfs_subprop_of = InferenceEngine::make_term("http://www.w3.org/2000/01/rdf-schema#subPropertyOf");
-        let rdf_type = InferenceEngine::make_term("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
-
-        // Object Properties
-        {
-            let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
-            let mut all_props = HashSet::new();
-            let mut has_parent = HashSet::new();
-            let target_type = InferenceEngine::make_term("http://www.w3.org/2002/07/owl#ObjectProperty");
-            let type_triples = self.manager.memory.main_graph.triples_matching(Any, Some(&rdf_type), Some(&target_type));
-            for t in type_triples.flatten() { all_props.insert(crate::rules::extract_str(&t.s())); }
-
-            let triples = self.manager.memory.main_graph.triples_matching(Any, Some(&rdfs_subprop_of), Any);
-            for t in triples.flatten() {
-                let child = crate::rules::extract_str(&t.s());
-                let parent = crate::rules::extract_str(&t.o());
-                if all_props.contains(&child) || all_props.contains(&parent) {
-                    children_map.entry(parent.clone()).or_default().push(child.clone());
-                    all_props.insert(child.clone());
-                    all_props.insert(parent.clone());
-                    has_parent.insert(child);
-                }
-            }
-            let mut roots: Vec<_> = all_props.into_iter().filter(|p| !has_parent.contains(p)).collect();
-            roots.sort();
-            for children in children_map.values_mut() { children.sort_unstable(); children.dedup(); }
-            self.object_prop_roots = roots;
-            self.object_prop_children = children_map;
-        }
-
-        // Datatype Properties
-        {
-            let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
-            let mut all_props = HashSet::new();
-            let mut has_parent = HashSet::new();
-            let target_type = InferenceEngine::make_term("http://www.w3.org/2002/07/owl#DatatypeProperty");
-            let type_triples = self.manager.memory.main_graph.triples_matching(Any, Some(&rdf_type), Some(&target_type));
-            for t in type_triples.flatten() { all_props.insert(crate::rules::extract_str(&t.s())); }
-
-            let triples = self.manager.memory.main_graph.triples_matching(Any, Some(&rdfs_subprop_of), Any);
-            for t in triples.flatten() {
-                let child = crate::rules::extract_str(&t.s());
-                let parent = crate::rules::extract_str(&t.o());
-                if all_props.contains(&child) || all_props.contains(&parent) {
-                    children_map.entry(parent.clone()).or_default().push(child.clone());
-                    all_props.insert(child.clone());
-                    all_props.insert(parent.clone());
-                    has_parent.insert(child);
-                }
-            }
-            let mut roots: Vec<_> = all_props.into_iter().filter(|p| !has_parent.contains(p)).collect();
-            roots.sort();
-            for children in children_map.values_mut() { children.sort_unstable(); children.dedup(); }
-            self.datatype_prop_roots = roots;
-            self.datatype_prop_children = children_map;
-        }
-
+        let g = &self.manager.memory.main_graph;
+        let (roots, children) = property_hierarchy(g, crate::vocab::OWL_OBJECT_PROPERTY);
+        self.object_prop_roots = roots;
+        self.object_prop_children = children;
+        let (roots, children) = property_hierarchy(g, crate::vocab::OWL_DATATYPE_PROPERTY);
+        self.datatype_prop_roots = roots;
+        self.datatype_prop_children = children;
         self.properties_cache_dirty = false;
     }
 
@@ -113,4 +62,34 @@ impl DarkstarApp {
             self.datatype_prop_children = children_map;
         }
     }
+}
+
+/// Root properties and `parent -> children` map for properties declared with `prop_type`
+/// (plus anything linked to them by rdfs:subPropertyOf). Lists are sorted.
+fn property_hierarchy(g: &crate::memory::DarkstarGraph, prop_type: &str) -> (Vec<String>, HashMap<String, Vec<String>>) {
+    use sophia::api::term::matcher::Any;
+    let rdfs_subprop_of = InferenceEngine::make_term(crate::vocab::RDFS_SUBPROPERTY_OF);
+    let rdf_type = InferenceEngine::make_term(crate::vocab::RDF_TYPE);
+    let target_type = InferenceEngine::make_term(prop_type);
+
+    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut all_props = HashSet::new();
+    let mut has_parent = HashSet::new();
+    for t in g.triples_matching(Any, Some(&rdf_type), Some(&target_type)).flatten() {
+        all_props.insert(crate::rules::extract_str(&t.s()));
+    }
+    for t in g.triples_matching(Any, Some(&rdfs_subprop_of), Any).flatten() {
+        let child = crate::rules::extract_str(&t.s());
+        let parent = crate::rules::extract_str(&t.o());
+        if all_props.contains(&child) || all_props.contains(&parent) {
+            children_map.entry(parent.clone()).or_default().push(child.clone());
+            all_props.insert(child.clone());
+            all_props.insert(parent);
+            has_parent.insert(child);
+        }
+    }
+    let mut roots: Vec<_> = all_props.into_iter().filter(|p| !has_parent.contains(p)).collect();
+    roots.sort();
+    for children in children_map.values_mut() { children.sort_unstable(); children.dedup(); }
+    (roots, children_map)
 }

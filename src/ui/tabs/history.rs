@@ -5,7 +5,7 @@ use crate::core::history::DarkstarEvent;
 impl DarkstarApp {
     pub fn render_history_tab(&mut self, ui: &mut egui::Ui) {
         let i = self.i18n();
-        let is_korean = self.settings.language == crate::core::settings::Language::Korean;
+        let is_korean = self.is_korean();
 
         ui.vertical(|ui| {
             // Header actions

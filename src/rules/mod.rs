@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod explain;
 
 use crate::memory::{DarkstarGraph, Fact, Inconsistency};
 use sophia::api::prelude::*;
@@ -8,31 +9,8 @@ use std::collections::HashMap;
 use sophia::api::term::{SimpleTerm, IriRef};
 use crate::rules::engine::InferenceEngine;
 
-// Standard ontology URIs
-pub const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-pub const RDFS_SUBCLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
-pub const RDFS_SUBPROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
-pub const OWL_TRANSITIVE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#TransitiveProperty";
-pub const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
-pub const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
-pub const OWL_INVERSE_OF: &str = "http://www.w3.org/2002/07/owl#inverseOf";
-pub const OWL_SAME_AS: &str = "http://www.w3.org/2002/07/owl#sameAs";
-pub const OWL_EQUIVALENT_CLASS: &str = "http://www.w3.org/2002/07/owl#equivalentClass";
-pub const OWL_IRREFLEXIVE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#IrreflexiveProperty";
-pub const OWL_ASYMMETRIC_PROPERTY: &str = "http://www.w3.org/2002/07/owl#AsymmetricProperty";
-pub const OWL_DIFFERENT_FROM: &str = "http://www.w3.org/2002/07/owl#differentFrom";
-pub const OWL_PROPERTY_CHAIN_AXIOM: &str = "http://www.w3.org/2002/07/owl#propertyChainAxiom";
-pub const RDF_FIRST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#first";
-pub const RDF_REST: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#rest";
-pub const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
-pub const OWL_INTERSECTION_OF: &str = "http://www.w3.org/2002/07/owl#intersectionOf";
-pub const OWL_UNION_OF: &str = "http://www.w3.org/2002/07/owl#unionOf";
-pub const OWL_ON_PROPERTY: &str = "http://www.w3.org/2002/07/owl#onProperty";
-pub const OWL_SOME_VALUES_FROM: &str = "http://www.w3.org/2002/07/owl#someValuesFrom";
-pub const OWL_ALL_VALUES_FROM: &str = "http://www.w3.org/2002/07/owl#allValuesFrom";
-pub const OWL_HAS_KEY: &str = "http://www.w3.org/2002/07/owl#hasKey";
-pub const OWL_DISJOINT_WITH: &str = "http://www.w3.org/2002/07/owl#disjointWith";
-pub const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
+// Vocabulary constants live in `crate::vocab`; re-exported so `rules::RDF_TYPE` etc. keep working.
+pub use crate::vocab::*;
 
 /// Helper to safely extract an interned string from a `sophia` Term.
 /// Blank nodes now preserve their unique ID to prevent massive collisions.
@@ -55,12 +33,12 @@ pub fn extract_str<T: Term>(term: &T) -> String {
             format!("l:{}", lex)
         }
     } else {
-        format!("b:anon")
+        "b:anon".to_string()
     }
 }
 
 /// Recursively extracts all elements from an RDF list starting at `head`.
-fn get_rdf_list<T: Term>(main: &DarkstarGraph, head: &T) -> Vec<String> {
+pub(crate) fn get_rdf_list<T: Term>(main: &DarkstarGraph, head: &T) -> Vec<String> {
     let mut elements = Vec::new();
     let mut current = extract_str(head);
     let mut visited = HashSet::new(); // Prevent circular lists
@@ -376,6 +354,11 @@ impl InferenceRule for CaxEqc {
     }
 }
 
+/// eq-ref: `x owl:sameAs x` for every term. Intentionally NOT registered in the engine:
+/// on large data it adds one triple per distinct term (~290k on CIDOC_Timeline_Mappings.ttl)
+/// and makes every eq-rep rule rescan the graph, while deriving nothing other rules need.
+/// Kept so it can be re-enabled explicitly.
+#[allow(dead_code)]
 pub struct EqRef;
 impl InferenceRule for EqRef {
     fn apply(&self, _main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
@@ -386,7 +369,7 @@ impl InferenceRule for EqRef {
             let o = extract_str(&t.o());
             new_facts.insert(Fact { s: s.clone(), p: OWL_SAME_AS.to_string(), o: s });
             new_facts.insert(Fact { s: p.clone(), p: OWL_SAME_AS.to_string(), o: p });
-            new_facts.insert(Fact { s: o.clone(), p: OWL_SAME_AS.to_string(), o: o });
+            new_facts.insert(Fact { s: o.clone(), p: OWL_SAME_AS.to_string(), o });
         }
         Ok(new_facts)
     }
@@ -492,7 +475,10 @@ impl InferenceRule for PrpIrp {
                 if t.s() == t.o() {
                     return Err(Inconsistency {
                         rule_name: "prp-irp".to_string(),
-                        conflicting_triples: vec![Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t.o()) }],
+                        conflicting_triples: vec![
+                            Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t.o()) },
+                            Fact { s: extract_str(&t.p()), p: RDF_TYPE.to_string(), o: OWL_IRREFLEXIVE_PROPERTY.to_string() },
+                        ],
                     });
                 }
             }
@@ -511,7 +497,11 @@ impl InferenceRule for PrpAsyp {
                 if main.contains(t.o(), t.p(), t.s()).unwrap_or(false) {
                     return Err(Inconsistency {
                         rule_name: "prp-asyp".to_string(),
-                        conflicting_triples: vec![Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t.o()) }],
+                        conflicting_triples: vec![
+                            Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t.o()) },
+                            Fact { s: extract_str(&t.o()), p: extract_str(&t.p()), o: extract_str(&t.s()) },
+                            Fact { s: extract_str(&t.p()), p: RDF_TYPE.to_string(), o: OWL_ASYMMETRIC_PROPERTY.to_string() },
+                        ],
                     });
                 }
             }
@@ -527,7 +517,10 @@ impl InferenceRule for EqDiff1 {
         let diff_from = SimpleTerm::Iri(IriRef::new_unchecked(OWL_DIFFERENT_FROM.into()));
         for t in delta.triples_matching(Any, Some(&same_as), Any).flatten() {
             if main.contains(t.s(), &diff_from, t.o()).unwrap_or(false) {
-                return Err(Inconsistency { rule_name: "eq-diff1".to_string(), conflicting_triples: vec![Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t.o()) }] });
+                return Err(Inconsistency { rule_name: "eq-diff1".to_string(), conflicting_triples: vec![
+                    Fact { s: extract_str(&t.s()), p: extract_str(&t.p()), o: extract_str(&t.o()) },
+                    Fact { s: extract_str(&t.s()), p: OWL_DIFFERENT_FROM.to_string(), o: extract_str(&t.o()) },
+                ] });
             }
         }
         Ok(HashSet::new())
@@ -780,7 +773,12 @@ impl InferenceRule for ClsDj {
             let c = t.o();
             for t2 in main.triples_matching(Some(c), Some(&disjoint), Any).flatten() {
                 if main.contains(x, &rdf_type, t2.o()).unwrap_or(false) {
-                    return Err(Inconsistency { rule_name: "cls-dj".to_string(), conflicting_triples: vec![Fact { s: extract_str(&x), p: RDF_TYPE.to_string(), o: extract_str(&c) }] });
+                    // Record every fact involved so the conflict can be explained from both sides.
+                    return Err(Inconsistency { rule_name: "cls-dj".to_string(), conflicting_triples: vec![
+                        Fact { s: extract_str(&x), p: RDF_TYPE.to_string(), o: extract_str(&c) },
+                        Fact { s: extract_str(&x), p: RDF_TYPE.to_string(), o: extract_str(&t2.o()) },
+                        Fact { s: extract_str(&c), p: OWL_DISJOINT_WITH.to_string(), o: extract_str(&t2.o()) },
+                    ] });
                 }
             }
         }
@@ -798,7 +796,7 @@ impl InferenceRule for ClsNothing {
     fn apply(&self, _main: &DarkstarGraph, delta: &DarkstarGraph) -> Result<HashSet<Fact>, Inconsistency> {
         let rdf_type = SimpleTerm::Iri(IriRef::new_unchecked(RDF_TYPE.into()));
         let nothing = SimpleTerm::Iri(IriRef::new_unchecked(OWL_NOTHING.into()));
-        for t in delta.triples_matching(Any, Some(&rdf_type), Some(&nothing)).flatten() {
+        if let Some(t) = delta.triples_matching(Any, Some(&rdf_type), Some(&nothing)).flatten().next() {
             return Err(Inconsistency { rule_name: "cls-nothing".to_string(), conflicting_triples: vec![Fact { s: extract_str(&t.s()), p: RDF_TYPE.to_string(), o: OWL_NOTHING.to_string() }] });
         }
         Ok(HashSet::new())

@@ -84,12 +84,11 @@ impl InferenceEngine {
         leaked
     }
 
+    /// Builds a sophia term from a Darkstar term string (`i:`/`l:`/`b:` prefix; bare = IRI).
     pub fn make_term(s: &str) -> SimpleTerm<'static> {
-        if s.starts_with("i:") {
-            let val = Self::intern(&s[2..]);
-            SimpleTerm::Iri(IriRef::new_unchecked(val.into()))
-        } else if s.starts_with("l:") {
-            let raw = &s[2..];
+        if let Some(iri) = s.strip_prefix("i:") {
+            SimpleTerm::Iri(IriRef::new_unchecked(Self::intern(iri).into()))
+        } else if let Some(raw) = s.strip_prefix("l:") {
             if let Some(idx) = raw.rfind("^^") {
                 let lex = Self::intern(&raw[..idx]);
                 let dt = Self::intern(&raw[idx + 2..]);
@@ -99,16 +98,13 @@ impl InferenceEngine {
                 let lang = Self::intern(&raw[idx + 1..]);
                 SimpleTerm::LiteralLanguage(lex.into(), LanguageTag::new_unchecked(lang.into()))
             } else {
-                let val = Self::intern(raw);
-                let xsd_string = IriRef::new_unchecked("http://www.w3.org/2001/XMLSchema#string".into());
-                SimpleTerm::LiteralDatatype(val.into(), xsd_string)
+                let xsd_string = IriRef::new_unchecked(crate::vocab::XSD_STRING.into());
+                SimpleTerm::LiteralDatatype(Self::intern(raw).into(), xsd_string)
             }
-        } else if s.starts_with("b:") {
-            let val = Self::intern(&s[2..]);
-            SimpleTerm::BlankNode(BnodeId::new_unchecked(val.into()))
+        } else if let Some(id) = s.strip_prefix("b:") {
+            SimpleTerm::BlankNode(BnodeId::new_unchecked(Self::intern(id).into()))
         } else {
-            let val = Self::intern(s);
-            SimpleTerm::Iri(IriRef::new_unchecked(val.into()))
+            SimpleTerm::Iri(IriRef::new_unchecked(Self::intern(s).into()))
         }
     }
 
@@ -122,7 +118,19 @@ impl InferenceEngine {
         memory.delta_graph = FastGraph::new();
         memory.is_consistent = true;
         memory.inconsistencies.clear();
-        self.saturate(memory, rules_settings, None);
+        memory.inferred_level.clear();
+        memory.max_level = 0;
+        if memory.imported_graph.triples().next().is_none() {
+            self.saturate(memory, rules_settings, None);
+        } else {
+            // Imported axioms take part in reasoning: main = asserted ∪ imported,
+            // and the whole union is the first delta.
+            for t in memory.imported_graph.triples().flatten() {
+                let _ = memory.main_graph.insert(t.s(), t.p(), t.o());
+            }
+            let first_delta = memory.main_graph.clone();
+            self.saturate(memory, rules_settings, Some(first_delta));
+        }
     }
 
     /// Incremental saturation for addition-only changes (semi-naive evaluation).
@@ -141,6 +149,8 @@ impl InferenceEngine {
         println!("Darkstar Reasoner: Starting inference ({})...", if initial_delta.is_some() { "incremental" } else { "full" });
         
         let mut iteration = 1;
+        // Levels continue after earlier runs so incremental derivations stay well-founded.
+        let level_base = memory.max_level;
         let mut active_rules: Vec<&Box<dyn InferenceRule>> = Vec::new();
         
         // Populate active rules based on settings
@@ -194,6 +204,8 @@ impl InferenceEngine {
                 if memory.main_graph.insert(&s_term, &p_term, &o_term).unwrap_or(false) {
                     next_delta.insert(&s_term, &p_term, &o_term).unwrap();
                     memory.inferred_graph.insert(&s_term, &p_term, &o_term).unwrap();
+                    memory.inferred_level.insert(crate::memory::normalize_fact(&fact), level_base + iteration);
+                    memory.max_level = level_base + iteration;
                     truly_new_count += 1;
                 }
             }

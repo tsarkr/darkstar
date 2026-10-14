@@ -15,7 +15,7 @@ impl DarkstarApp {
 
     pub fn render_source_editor_tab(&mut self, ui: &mut egui::Ui) {
         let i = self.i18n();
-        let is_korean = self.settings.language == crate::core::settings::Language::Korean;
+        let is_korean = self.is_korean();
         let large = self.source_is_large();
 
         ui.vertical(|ui| {

@@ -14,11 +14,12 @@ impl DarkstarApp {
         let mut seen_nodes = HashSet::new();
         let mut node_types = HashMap::new();
 
-        let owl_class = "i:http://www.w3.org/2002/07/owl#Class";
-        let rdfs_class = "i:http://www.w3.org/2000/01/rdf-schema#Class";
-        let owl_obj_prop = "i:http://www.w3.org/2002/07/owl#ObjectProperty";
-        let owl_data_prop = "i:http://www.w3.org/2002/07/owl#DatatypeProperty";
-        let owl_individual = "i:http://www.w3.org/2002/07/owl#NamedIndividual";
+        use crate::vocab as v;
+        let owl_class = v::iri(v::OWL_CLASS);
+        let rdfs_class = v::iri(v::RDFS_CLASS);
+        let owl_obj_prop = v::iri(v::OWL_OBJECT_PROPERTY);
+        let owl_data_prop = v::iri(v::OWL_DATATYPE_PROPERTY);
+        let owl_individual = v::iri(v::OWL_NAMED_INDIVIDUAL);
 
         // Reset the "show more" limit whenever the focused entity changes.
         if self.focus_limit_uri != self.selected_uri {
@@ -57,7 +58,7 @@ impl DarkstarApp {
                 let mut matched: Vec<String> = Vec::new();
                 let mut others: Vec<String> = Vec::new();
 
-                let graphs = [&self.manager.memory.asserted_graph, &self.manager.memory.inferred_graph];
+                let graphs = [&self.manager.memory.asserted_graph, &self.manager.memory.inferred_graph, &self.manager.memory.imported_graph];
                 let u_term = crate::rules::engine::InferenceEngine::make_term(&u);
                 'neigh: for g in graphs {
                     let outgoing = g.triples_matching(Some(&u_term), sophia::api::term::matcher::Any, sophia::api::term::matcher::Any)
@@ -92,12 +93,9 @@ impl DarkstarApp {
             visible_in_focus.clone()
         } else {
             let mut sample_nodes = HashSet::new();
-            let mut count = 0;
-            for t in self.manager.memory.asserted_graph.triples().flatten() {
-                if count >= 1000 { break; }
+            for t in self.manager.memory.asserted_graph.triples().flatten().take(1000) {
                 sample_nodes.insert(crate::rules::extract_str(&t.s()));
                 sample_nodes.insert(crate::rules::extract_str(&t.o()));
-                count += 1;
             }
             sample_nodes
         };
@@ -113,7 +111,7 @@ impl DarkstarApp {
             }
 
             let uri_term = crate::rules::engine::InferenceEngine::make_term(uri);
-            let rdf_type_term = crate::rules::engine::InferenceEngine::make_term("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+            let rdf_type_term = crate::rules::engine::InferenceEngine::make_term(crate::vocab::RDF_TYPE);
             let type_triples = self.manager.memory.main_graph.triples_matching(Some(&uri_term), Some(&rdf_type_term), sophia::api::term::matcher::Any);
             for t in type_triples.flatten() {
                 let o = crate::rules::extract_str(&t.o());
@@ -141,7 +139,7 @@ impl DarkstarApp {
         let mut seen_triples = HashSet::new();
         
         if self.filters.focus_mode {
-            let graphs = [&self.manager.memory.asserted_graph, &self.manager.memory.inferred_graph];
+            let graphs = [&self.manager.memory.asserted_graph, &self.manager.memory.inferred_graph, &self.manager.memory.imported_graph];
             for &g in &graphs {
                 let is_inferred = std::ptr::eq(g, &self.manager.memory.inferred_graph);
                 for u in &visible_in_focus {

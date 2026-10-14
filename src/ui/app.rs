@@ -105,6 +105,8 @@ pub struct DarkstarApp {
     pub cache_revision: u64,
     /// Cached (asserted, inferred) triple counts for the status bar.
     pub triple_counts: (usize, usize),
+    pub imported_count: usize,
+    pub show_imports_dialog: bool,
     /// True when focus-mode graph exploration hit the node cap.
     pub graph_truncated: bool,
     /// Source editor: user explicitly asked to load a very large ontology into the text editor.
@@ -123,6 +125,31 @@ pub struct DarkstarApp {
     /// Entity editor: rows shown per section [asserted, inferred, incoming], reset on new selection.
     pub relation_limits: [usize; 3],
     pub relation_limits_uri: Option<String>,
+
+    // Query tabs
+    pub sparql_query: String,
+    pub sparql_include_inferred: bool,
+    pub sparql_result: Option<Result<crate::query::sparql::SparqlOutput, String>>,
+    pub dl_query: String,
+    pub dl_index: Option<crate::query::dlquery::DlIndex>,
+    pub dl_index_revision: u64,
+    pub dl_result: Option<Result<crate::query::dlquery::DlResult, String>>,
+    /// DL Query sections shown: [instances, superclasses, equivalent, subclasses]
+    pub dl_show: [bool; 4],
+
+    // Explanations
+    pub explain_target: Option<(String, String, String)>,
+    pub explanation: Option<crate::rules::explain::Explanation>,
+    pub explanation_revision: u64,
+    pub show_inconsistencies: bool,
+
+    // Description editor
+    pub rename_buffer: Option<String>,
+    pub desc_inputs: HashMap<String, String>,
+    pub desc_error: Option<(String, String)>,
+    pub ann_prop_idx: usize,
+    pub ann_value: String,
+    pub ann_lang: String,
 }
 
 impl DarkstarApp {
@@ -165,7 +192,7 @@ impl DarkstarApp {
         let native_pp = cc.egui_ctx.native_pixels_per_point().unwrap_or(1.0);
         cc.egui_ctx.set_pixels_per_point(native_pp * settings.ui_scale);
 
-        let mut dock_state = DockState::new(vec![DarkstarTab::Graph, DarkstarTab::SourceEditor]);
+        let mut dock_state = DockState::new(vec![DarkstarTab::Graph, DarkstarTab::SourceEditor, DarkstarTab::Sparql, DarkstarTab::DlQuery]);
         // 1. Split far right for EntityEditor
         let [left_and_center, _right] = dock_state.main_surface_mut().split_right(egui_dock::NodeIndex::root(), 0.8, vec![DarkstarTab::EntityEditor]);
         // 2. Split far left for Classes
@@ -235,6 +262,8 @@ impl DarkstarApp {
             collapsed_types: HashSet::new(),
             cache_revision: u64::MAX,
             triple_counts: (0, 0),
+            imported_count: 0,
+            show_imports_dialog: false,
             graph_truncated: false,
             source_force_full: false,
             source_preview: None,
@@ -245,6 +274,24 @@ impl DarkstarApp {
             graph_sync_query: String::new(),
             relation_limits: [crate::ui::tabs::entity_editor::RELATION_ROWS_STEP; 3],
             relation_limits_uri: None,
+            sparql_query: crate::ui::tabs::query::SPARQL_DEFAULT.to_string(),
+            sparql_include_inferred: true,
+            sparql_result: None,
+            dl_query: String::new(),
+            dl_index: None,
+            dl_index_revision: u64::MAX,
+            dl_result: None,
+            dl_show: [true, true, true, true],
+            explain_target: None,
+            explanation: None,
+            explanation_revision: u64::MAX,
+            show_inconsistencies: false,
+            rename_buffer: None,
+            desc_inputs: HashMap::new(),
+            desc_error: None,
+            ann_prop_idx: 0,
+            ann_value: String::new(),
+            ann_lang: "ko".to_string(),
         };
         
         crate::plugins::load_all(&mut app.plugin_manager, &mut app.manager);
@@ -266,8 +313,11 @@ impl DarkstarApp {
             Ok(_) => {
                 self.settings.add_recent(path.to_path_buf());
                 self.on_ontology_loaded();
+                if self.manager.import_statuses.iter().any(|s| !s.ok()) {
+                    self.show_imports_dialog = true;
+                }
 
-                let is_korean = self.settings.language == crate::core::settings::Language::Korean;
+                let is_korean = self.is_korean();
                 let msg = if let Some(prev) = prev_name {
                     if is_korean {
                         format!("기존 파일 '{}'을(를) 닫고 '{}'을(를) 새로 불러왔습니다.", prev, new_name)
@@ -301,7 +351,7 @@ impl DarkstarApp {
         self.manager.new_ontology();
         self.on_ontology_cleared();
 
-        let is_korean = self.settings.language == crate::core::settings::Language::Korean;
+        let is_korean = self.is_korean();
         let msg = if let Some(prev) = prev_name {
             if is_korean {
                 format!("기존 파일 '{}'을(를) 닫고 새 온톨로지를 생성했습니다.", prev)
@@ -318,8 +368,9 @@ impl DarkstarApp {
         self.status_message = Some((msg, std::time::Instant::now()));
     }
 
-    pub fn on_ontology_loaded(&mut self) {
-        // 1. Clear all graph nodes and edges completely
+    /// Resets every piece of per-ontology view state (graph, caches, editors, query results).
+    fn reset_view_state(&mut self) {
+        // Graph view
         self.nodes.clear();
         self.edges.clear();
         self.selected_uri = None;
@@ -332,7 +383,7 @@ impl DarkstarApp {
         self.trigger_fit = true;
         self.graph_needs_sync = true;
 
-        // 2. Invalidate entity trees and caches
+        // Entity trees and lists
         self.classes_cache_dirty = true;
         self.properties_cache_dirty = true;
         self.individuals_cache_dirty = true;
@@ -343,80 +394,57 @@ impl DarkstarApp {
         self.datatype_prop_roots.clear();
         self.datatype_prop_children.clear();
         self.individuals_by_type.clear();
+        self.collapsed_types.clear();
+        self.individual_rows_dirty = true;
 
-        // 3. Source editor is synchronized lazily (only when its tab is actually visible).
-        //    Serializing a large ontology eagerly costs hundreds of ms and tens of MB.
+        // Source editor (re-serialized lazily, only when its tab is visible)
         self.source_code_error = None;
         self.source_code_buffer.clear();
         self.source_preview = None;
         self.source_force_full = false;
-        self.source_needs_sync = true;
-        self.collapsed_types.clear();
-        self.individual_rows_dirty = true;
 
-        // 4. Run reasoning with active user settings
-        self.manager.run_reasoning(&self.settings.enabled_rules);
+        // Results that belonged to the previous ontology
+        self.explain_target = None;
+        self.explanation = None;
+        self.sparql_result = None;
+        self.dl_result = None;
+        self.rename_buffer = None;
+        self.desc_error = None;
+    }
 
-        // 5. Notify plugins
+    fn notify_plugins_reset(&mut self) {
         let event = crate::core::history::DarkstarEvent::Batch(vec![]);
         for plugin in &mut self.plugin_manager.plugins {
             plugin.handle_event(&event, &mut self.manager);
         }
+    }
+
+    pub fn on_ontology_loaded(&mut self) {
+        self.reset_view_state();
+        self.source_needs_sync = true;
+        self.manager.run_reasoning(&self.settings.enabled_rules);
+        self.notify_plugins_reset();
     }
 
     pub fn on_ontology_cleared(&mut self) {
-        self.nodes.clear();
-        self.edges.clear();
-        self.selected_uri = None;
-        self.expanded_nodes.clear();
-        self.selected_individuals.clear();
-        self.dragging_node = None;
-        self.last_graph_rect = None;
-        self.graph_offset = Vec2::ZERO;
-        self.graph_scale = 1.0;
-        self.trigger_fit = true;
-        self.graph_needs_sync = true;
-
-        self.classes_cache_dirty = true;
-        self.properties_cache_dirty = true;
-        self.individuals_cache_dirty = true;
-        self.class_roots.clear();
-        self.class_children.clear();
-        self.object_prop_roots.clear();
-        self.object_prop_children.clear();
-        self.datatype_prop_roots.clear();
-        self.datatype_prop_children.clear();
-        self.individuals_by_type.clear();
-
-        self.source_code_error = None;
+        self.reset_view_state();
         self.source_needs_sync = false;
-        self.source_code_buffer.clear();
-        self.source_preview = None;
-        self.source_force_full = false;
-        self.collapsed_types.clear();
-        self.individual_rows_dirty = true;
-
-        let event = crate::core::history::DarkstarEvent::Batch(vec![]);
-        for plugin in &mut self.plugin_manager.plugins {
-            plugin.handle_event(&event, &mut self.manager);
-        }
+        self.notify_plugins_reset();
     }
 
     pub fn get_label(prefixed_uri: &str) -> String {
-        if prefixed_uri.starts_with("l:") {
-            let raw = &prefixed_uri[2..];
+        if let Some(raw) = prefixed_uri.strip_prefix("l:") {
             if let Some(idx) = raw.rfind("^^") {
                 let val = &raw[..idx];
                 let dt = &raw[idx + 2..];
-                let dt_name = dt.split('/').last().unwrap_or(dt).split('#').last().unwrap_or(dt);
+                let dt_name = dt.split('/').next_back().unwrap_or(dt).split('#').next_back().unwrap_or(dt);
                 format!("\"{}\"^^{}", val, dt_name)
             } else if let Some(idx) = raw.rfind('@') {
                 format!("\"{}\"@{}", &raw[..idx], &raw[idx + 1..])
             } else {
                 format!("\"{}\"", raw)
             }
-        } else if prefixed_uri.starts_with("b:") {
-            let bnode = &prefixed_uri[2..];
+        } else if let Some(bnode) = prefixed_uri.strip_prefix("b:") {
             format!("_:{}", bnode)
         } else {
             let uri = if prefixed_uri.len() >= 2 && &prefixed_uri[1..2] == ":" {
@@ -424,7 +452,7 @@ impl DarkstarApp {
             } else {
                 prefixed_uri
             };
-            uri.split('/').last().unwrap_or(uri).split('#').last().unwrap_or(uri).to_string()
+            uri.split('/').next_back().unwrap_or(uri).split('#').next_back().unwrap_or(uri).to_string()
         }
     }
 
@@ -476,6 +504,7 @@ impl DarkstarApp {
                 self.manager.memory.asserted_graph.triples().count(),
                 self.manager.memory.inferred_graph.triples().count(),
             );
+            self.imported_count = self.manager.memory.imported_graph.triples().count();
         }
 
         self.render_plugin_guide(ctx);
@@ -485,6 +514,9 @@ impl DarkstarApp {
         self.render_top_bar(ctx);
         self.render_status_bar(ctx);
         self.render_dialogs(ctx);
+        self.render_imports_dialog(ctx);
+        self.render_inconsistency_window(ctx);
+        self.render_explanation_window(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
             let mut dock_state = std::mem::replace(&mut self.dock_state, egui_dock::DockState::new(vec![]));
             {
@@ -493,286 +525,6 @@ impl DarkstarApp {
             }
             self.dock_state = dock_state;
         });
-    }
-
-    pub fn render_status_bar(&mut self, ctx: &egui::Context) {
-        let i = self.i18n();
-        let is_korean = self.settings.language == Language::Korean;
-
-        egui::TopBottomPanel::bottom("bottom_status_panel").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // Status message or active file info
-                let mut has_message = false;
-                if let Some((msg, time)) = &self.status_message {
-                    if time.elapsed().as_secs() < 8 {
-                        has_message = true;
-                        ui.label(
-                            egui::RichText::new(format!("ℹ {}", msg))
-                                .color(if self.settings.theme_dark { egui::Color32::from_rgb(120, 220, 160) } else { egui::Color32::from_rgb(20, 140, 60) })
-                                .strong()
-                        );
-                    }
-                }
-
-                if !has_message {
-                    if let Some(path) = &self.manager.active_file_path {
-                        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("ontology");
-                        let dirty_flag = if self.manager.needs_save { "*" } else { "" };
-                        ui.label(format!("📄 {}{}", filename, dirty_flag));
-                    } else {
-                        ui.label(format!("✨ {}", i.status_ready));
-                    }
-                }
-
-                // If external file change was detected
-                if self.external_file_changed {
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(if is_korean { "⚠️ 파일이 외부에서 변경되었습니다!" } else { "⚠️ File changed externally!" })
-                            .color(egui::Color32::YELLOW)
-                            .strong()
-                    );
-                    if ui.button(if is_korean { "새로고침 (다시 로드)" } else { "Reload" }).clicked() {
-                        if let Some(path) = self.manager.active_file_path.clone() {
-                            self.open_ontology_file(&path);
-                        }
-                        self.external_file_changed = false;
-                    }
-                    if ui.button(if is_korean { "무시" } else { "Ignore" }).clicked() {
-                        if let Some(path) = &self.manager.active_file_path {
-                            self.manager.file_modified_time = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-                        }
-                        self.external_file_changed = false;
-                    }
-                }
-
-                // Right aligned stats
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Consistency badge
-                    if self.manager.memory.is_consistent {
-                        ui.label(egui::RichText::new(format!("● {}", i.consistent)).color(egui::Color32::GREEN).size(11.0));
-                    } else {
-                        ui.label(egui::RichText::new(format!("● {}", i.inconsistent)).color(egui::Color32::RED).size(11.0));
-                    }
-                    ui.separator();
-                    
-                    let (assert_count, inf_count) = self.triple_counts;
-                    ui.label(format!("Triples: {} (+{} inferred)", assert_count, inf_count));
-                });
-            });
-        });
-    }
-
-    fn render_settings(&mut self, ctx: &egui::Context) {
-        if !self.show_settings { return; }
-        let i = self.i18n();
-        let mut show = self.show_settings;
-        let mut changed = false;
-        let mut close_clicked = false;
-        
-        egui::Window::new(i.settings_title)
-            .open(&mut show)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                ui.vertical(|ui| {
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new(i.appearance).strong());
-                        if ui.checkbox(&mut self.settings.theme_dark, i.theme_dark).changed() { changed = true; }
-                        ui.horizontal(|ui| {
-                            ui.label(i.ui_scale);
-                            if ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.5..=2.0)).changed() {
-                                changed = true;
-                            }
-                            if ui.button(i.apply).clicked() {
-                                let native_pp = ctx.native_pixels_per_point().unwrap_or(1.0);
-                                ctx.set_pixels_per_point(native_pp * self.settings.ui_scale);
-                            }
-                            if ui.button("1.0").on_hover_text("기본 크기(1.0)로 초기화").clicked() {
-                                self.settings.ui_scale = 1.0;
-                                let native_pp = ctx.native_pixels_per_point().unwrap_or(1.0);
-                                ctx.set_pixels_per_point(native_pp);
-                                changed = true;
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(i.language);
-                            let old_lang = self.settings.language;
-                            egui::ComboBox::from_id_salt("lang_combo")
-                                .selected_text(format!("{:?}", self.settings.language))
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut self.settings.language, crate::core::settings::Language::English, "English");
-                                    ui.selectable_value(&mut self.settings.language, crate::core::settings::Language::Korean, "한국어");
-                                });
-                            if self.settings.language != old_lang { changed = true; }
-                        });
-                    });
-                    
-                    ui.add_space(10.0);
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new(i.rules_title).strong());
-                        if ui.checkbox(&mut self.settings.enabled_rules.equality, i.eq_rules).changed() { changed = true; }
-                        if ui.checkbox(&mut self.settings.enabled_rules.property_chains, i.chain_rules).changed() { changed = true; }
-                        if ui.checkbox(&mut self.settings.enabled_rules.class_expressions, i.exp_rules).changed() { changed = true; }
-                        if ui.checkbox(&mut self.settings.enabled_rules.restrictions, i.restr_rules).changed() { changed = true; }
-                        if ui.checkbox(&mut self.settings.enabled_rules.datatypes, i.dt_rules).changed() { changed = true; }
-                        if ui.checkbox(&mut self.settings.enabled_rules.schema, i.scm_rules).changed() { changed = true; }
-                    });
-
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button(i.close).clicked() { close_clicked = true; }
-                    });
-                });
-            });
-        
-        if close_clicked { show = false; }
-        if changed {
-            self.settings.save();
-            self.manager.is_dirty = true;
-            self.graph_needs_sync = true;
-        }
-        self.show_settings = show;
-    }
-
-    fn render_help(&mut self, ctx: &egui::Context) {
-        if !self.show_help { return; }
-        let i = self.i18n();
-        let mut show = self.show_help;
-        let mut close_clicked = false;
-        egui::Window::new(i.help)
-            .open(&mut show)
-            .default_width(500.0)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        ui.heading("Darkstar Ontology Editor Help");
-                        ui.separator();
-                        
-                        ui.group(|ui| {
-                            ui.label(egui::RichText::new(i.file).strong());
-                            ui.label("• New: Create a fresh ontology.");
-                            ui.label("• Open: Load RDF/OWL files from your disk.");
-                            ui.label("• Open Recent: Quick access to your last 5 files.");
-                            ui.label("• Save/Save As: Persist your changes to Turtle (.ttl) format.");
-                        });
-
-                        ui.add_space(5.0);
-                        ui.group(|ui| {
-                            ui.label(egui::RichText::new(i.reasoning).strong());
-                            ui.label("• Start Reasoner: Manually trigger the parallel forward-chaining engine.");
-                            ui.label("• Auto-Reasoning: Automatically re-run inference when any triple is added or removed.");
-                        });
-
-                        ui.add_space(5.0);
-                        ui.group(|ui| {
-                            ui.label(egui::RichText::new(i.graph_view).strong());
-                            ui.label("• Focus Mode: (Default) Only show nodes near the selected entity.");
-                            ui.label("• Expansion Depth: Control how many hops are visible around the focused node.");
-                        });
-
-                        ui.add_space(5.0);
-                        ui.group(|ui| {
-                            ui.label(egui::RichText::new(i.window).strong());
-                            ui.label("• Show/Hide Tabs: Toggle visibility of Classes, Graph, Editor, etc.");
-                            ui.label("• Reset Layout: Restore the default professional workspace arrangement.");
-                        });
-
-                        ui.add_space(10.0);
-                        if ui.button(i.close).clicked() { close_clicked = true; }
-                    });
-                });
-            });
-        if close_clicked { show = false; }
-        self.show_help = show;
-    }
-
-    fn render_dialogs(&mut self, ctx: &egui::Context) {
-        let i = self.i18n();
-        // use removed here as we added them to top level
-
-        // 1. Delete Confirmation
-        if let Some(uri) = self.confirm_delete_uri.clone() {
-            let mut open = true;
-            egui::Window::new(i.delete)
-                .open(&mut open)
-                .resizable(false)
-                .collapsible(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.label(i.confirm_delete_msg);
-                        ui.add_space(5.0);
-                        ui.label(egui::RichText::new(&uri).monospace().color(egui::Color32::GRAY));
-                        ui.add_space(10.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Confirm").clicked() {
-                                let s_term = InferenceEngine::make_term(&uri);
-                                // Indexed lookups instead of a full scan of the asserted graph.
-                                let mut seen = HashSet::new();
-                                let mut to_delete = Vec::new();
-                                let g = &self.manager.memory.asserted_graph;
-                                for t in g.triples_matching(Some(&s_term), Any, Any).flatten()
-                                    .chain(g.triples_matching(Any, Any, Some(&s_term)).flatten())
-                                {
-                                    let key = (crate::rules::extract_str(&t.s()), crate::rules::extract_str(&t.p()), crate::rules::extract_str(&t.o()));
-                                    if seen.insert(key.clone()) { to_delete.push(key); }
-                                }
-                                self.manager.remove_assertions_batch(to_delete);
-                                self.selected_uri = None;
-                                self.confirm_delete_uri = None;
-                                self.graph_needs_sync = true;
-                            }
-                            if ui.button(i.close).clicked() {
-                                self.confirm_delete_uri = None;
-                            }
-                        });
-                    });
-                });
-            if !open { self.confirm_delete_uri = None; }
-        }
-
-        // 2. Rename Dialog
-        if let Some((old_uri, mut new_label)) = self.renaming_uri.clone() {
-            let mut open = true;
-            egui::Window::new(i.rename_entity)
-                .open(&mut open)
-                .resizable(false)
-                .collapsible(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.vertical(|ui| {
-                        ui.label(format!("Old URI: {}", old_uri));
-                        ui.horizontal(|ui| {
-                            ui.label("New Label:");
-                            ui.text_edit_singleline(&mut new_label);
-                        });
-                        ui.add_space(10.0);
-                        ui.horizontal(|ui| {
-                            if ui.button("Rename (Apply Label)").clicked() {
-                                let rdfs_label = "http://www.w3.org/2000/01/rdf-schema#label".to_string();
-                                let s_term = InferenceEngine::make_term(&old_uri);
-                                let p_term = InferenceEngine::make_term(&rdfs_label);
-                                let mut to_remove = Vec::new();
-                                for t in self.manager.memory.asserted_graph.triples_matching(Some(&s_term), Some(&p_term), Any).flatten() {
-                                    to_remove.push(crate::rules::extract_str(&t.o()));
-                                }
-                                for old_val in to_remove {
-                                    self.manager.remove_assertion(old_uri.clone(), rdfs_label.clone(), old_val);
-                                }
-                                self.manager.add_assertion(old_uri.clone(), rdfs_label, format!("l:{}", new_label));
-                                self.renaming_uri = None;
-                                self.graph_needs_sync = true;
-                            }
-                            if ui.button(i.close).clicked() {
-                                self.renaming_uri = None;
-                            }
-                        });
-                    });
-                });
-            if !open { self.renaming_uri = None; }
-            else if self.renaming_uri.is_some() { self.renaming_uri = Some((old_uri, new_label)); }
-        }
     }
 
     pub fn generate_unique_uri(&self, prefix: &str) -> String {
@@ -787,62 +539,6 @@ impl DarkstarApp {
         }
     }
 
-    pub fn render_exit_dialog(&mut self, ctx: &egui::Context) {
-        if !self.show_exit_dialog { return; }
-        
-        let i = self.i18n();
-        let mut open = self.show_exit_dialog;
-        
-        egui::Window::new(i.unsaved_changes_title)
-            .open(&mut open)
-            .resizable(false)
-            .collapsible(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.vertical(|ui| {
-                    ui.label(i.unsaved_changes_msg);
-                    ui.add_space(10.0);
-                    
-                    ui.horizontal(|ui| {
-                        if ui.button(i.save_and_quit).clicked() {
-                            // If we have a file, save and close
-                            if let Some(path) = self.manager.active_file_path.clone() {
-                                if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
-                                    eprintln!("Save error: {}", e);
-                                } else {
-                                    self.allowed_to_close = true;
-                                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                                }
-                            } else {
-                                // Save As dialog
-                                if let Some(path) = rfd::FileDialog::new().set_file_name("ontology.owl").save_file() {
-                                    if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
-                                        eprintln!("Save error: {}", e);
-                                    } else {
-                                        self.settings.add_recent(path);
-                                        self.allowed_to_close = true;
-                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                                    }
-                                }
-                            }
-                            self.show_exit_dialog = false;
-                        }
-                        
-                        if ui.button(i.quit_without_saving).clicked() {
-                            self.allowed_to_close = true;
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                            self.show_exit_dialog = false;
-                        }
-                        
-                        if ui.button(i.close).clicked() {
-                            self.show_exit_dialog = false;
-                        }
-                    });
-                });
-            });
-            
-        if !open { self.show_exit_dialog = false; }
-    }
 }
 
 impl eframe::App for DarkstarApp {
@@ -885,12 +581,11 @@ impl eframe::App for DarkstarApp {
             }
         }
 
-        if ctx.input(|i| i.viewport().close_requested()) {
-            if self.manager.needs_save && !self.allowed_to_close {
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.manager.needs_save && !self.allowed_to_close {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.show_exit_dialog = true;
             }
-        }
 
         match self.state {
             AppState::Splash => self.render_splash(ctx),

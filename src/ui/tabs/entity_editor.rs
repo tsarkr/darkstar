@@ -27,12 +27,14 @@ impl DarkstarApp {
         }
         let limits = self.relation_limits;
         let mut more_section: Option<usize> = None;
+        let mut explain_request: Option<(String, String, String)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new(i.property_editor).size(11.0).strong());
                 ui.separator();
                 
-                if let Some(uri) = &self.selected_uri {
+                if let Some(uri_owned) = self.selected_uri.clone() {
+                    let uri = &uri_owned;
                     ui.label(egui::RichText::new(uri).monospace().size(11.0).color(egui::Color32::GRAY));
                     ui.add_space(5.0);
                     
@@ -49,62 +51,12 @@ impl DarkstarApp {
                         }
                     });
 
-                    // Quick Edit: Label
-                    let mut current_label = label.clone();
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{}:", i.object_label));
-                        if ui.add(egui::TextEdit::singleline(&mut current_label).desired_width(200.0)).lost_focus() && current_label != label {
-                            // Update label (rdfs:label)
-                            let rdfs_label = "http://www.w3.org/2000/01/rdf-schema#label".to_string();
-                            // Remove old labels
-                            let s_term = InferenceEngine::make_term(uri);
-                            let p_term = InferenceEngine::make_term(&rdfs_label);
-                            let mut to_remove = Vec::new();
-                            for t in self.manager.memory.asserted_graph.triples_matching(Some(&s_term), Some(&p_term), Any).flatten() {
-                                to_remove.push(crate::rules::extract_str(&t.o()));
-                            }
-                            for old_val in to_remove {
-                                self.manager.remove_assertion(uri.clone(), rdfs_label.clone(), old_val);
-                            }
-                            // Add new label
-                            self.manager.add_assertion(uri.clone(), rdfs_label, format!("l:{}", current_label));
-                            self.graph_needs_sync = true;
-                        }
-                    });
-
-                    ui.add_space(5.0);
-                    
-                    // Property Characteristics
-                    let owl_functional = "http://www.w3.org/2002/07/owl#FunctionalProperty".to_string();
-                    let owl_transitive = "http://www.w3.org/2002/07/owl#TransitiveProperty".to_string();
-                    let owl_symmetric = "http://www.w3.org/2002/07/owl#SymmetricProperty".to_string();
-                    let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type".to_string();
-                    
-                    let s_term = InferenceEngine::make_term(uri);
-                    let rdf_type_term = InferenceEngine::make_term(&rdf_type);
-                    
-                    let is_functional = self.manager.memory.asserted_graph.contains(&s_term, &rdf_type_term, &InferenceEngine::make_term(&owl_functional)).unwrap();
-                    let is_transitive = self.manager.memory.asserted_graph.contains(&s_term, &rdf_type_term, &InferenceEngine::make_term(&owl_transitive)).unwrap();
-                    let is_symmetric = self.manager.memory.asserted_graph.contains(&s_term, &rdf_type_term, &InferenceEngine::make_term(&owl_symmetric)).unwrap();
-
-                    ui.horizontal(|ui| {
-                        if ui.checkbox(&mut is_functional.clone(), "Functional").changed() {
-                            if !is_functional { self.manager.add_assertion(uri.clone(), rdf_type.clone(), owl_functional); }
-                            else { self.manager.remove_assertion(uri.clone(), rdf_type.clone(), owl_functional); }
-                        }
-                        if ui.checkbox(&mut is_transitive.clone(), "Transitive").changed() {
-                            if !is_transitive { self.manager.add_assertion(uri.clone(), rdf_type.clone(), owl_transitive); }
-                            else { self.manager.remove_assertion(uri.clone(), rdf_type.clone(), owl_transitive); }
-                        }
-                        if ui.checkbox(&mut is_symmetric.clone(), "Symmetric").changed() {
-                            if !is_symmetric { self.manager.add_assertion(uri.clone(), rdf_type.clone(), owl_symmetric); }
-                            else { self.manager.remove_assertion(uri.clone(), rdf_type.clone(), owl_symmetric); }
-                        }
-                    });
+                    // Protégé-style description: annotations, axioms by entity kind, IRI rename.
+                    self.render_description(ui, uri);
 
                     ui.add_space(5.0);
                     ui.separator();
-                    
+
                     // Add New Relation
                     ui.label(egui::RichText::new(i.add_relation).size(11.0).strong());
                     ui.horizontal(|ui| {
@@ -112,15 +64,14 @@ impl DarkstarApp {
                     });
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.new_prop_value).hint_text(i.object_label).font(egui::FontId::proportional(11.0)).desired_width(120.0));
-                        if ui.button(egui::RichText::new(format!("✚ {}", i.add)).size(11.0)).clicked() {
-                            if !self.new_prop_predicate.is_empty() && !self.new_prop_value.is_empty() {
+                        if ui.button(egui::RichText::new(format!("✚ {}", i.add)).size(11.0)).clicked()
+                            && !self.new_prop_predicate.is_empty() && !self.new_prop_value.is_empty() {
                                 self.manager.add_assertion(uri.clone(), self.new_prop_predicate.clone(), self.new_prop_value.clone());
                                 self.new_prop_predicate.clear();
                                 self.new_prop_value.clear();
                                 self.graph_needs_sync = true;
                                 if self.auto_reasoning { self.manager.run_reasoning(&self.settings.enabled_rules); }
                             }
-                        }
                     });
                     ui.add_space(10.0);
                     ui.separator();
@@ -152,7 +103,7 @@ impl DarkstarApp {
                                 
                                 if is_editing {
                                     let mut edit_val = ui.data_mut(|d| d.get_temp::<String>(edit_id.with("val")).unwrap_or_else(|| {
-                                        if o.starts_with("l:") { o[2..].to_string() } else { o.clone() }
+                                        o.strip_prefix("l:").unwrap_or(&o).to_string()
                                     }));
                                     
                                     let response = ui.add(egui::TextEdit::singleline(&mut edit_val).desired_width(120.0));
@@ -177,7 +128,7 @@ impl DarkstarApp {
                                     if ui.button("✏").on_hover_text("Edit").clicked() {
                                         ui.data_mut(|d| {
                                             d.insert_temp(edit_id, true);
-                                            d.insert_temp(edit_id.with("val"), if o.starts_with("l:") { o[2..].to_string() } else { o.clone() });
+                                            d.insert_temp(edit_id.with("val"), o.strip_prefix("l:").unwrap_or(&o).to_string());
                                         });
                                     }
                                     if ui.add(egui::Button::new(egui::RichText::new("x").size(11.0))).on_hover_text("Delete").clicked() {
@@ -205,8 +156,27 @@ impl DarkstarApp {
                                     ui.label(egui::RichText::new(Self::get_label(&p)).size(11.0).color(egui::Color32::from_rgb(100, 200, 100)));
                                     ui.label("➔");
                                     ui.label(egui::RichText::new(Self::get_label(&o)).size(11.0).italics());
+                                    // Protégé-style "?" : why was this inferred?
+                                    if ui.small_button("?").on_hover_text("추론 근거 보기 (Explain)").clicked() {
+                                        explain_request = Some((uri.clone(), p.clone(), o.clone()));
+                                    }
                                 });
                             }
+                        }
+                    }
+
+                    // Imported (owl:imports) axioms about this entity: read-only, like Protégé.
+                    if self.manager.memory.imported_graph.triples_matching(Some(&s_term), Any, Any).flatten().next().is_some() {
+                        ui.add_space(5.0);
+                        ui.label(egui::RichText::new("가져온 공리 (Imported, read-only)").size(10.0).weak());
+                        for t in self.manager.memory.imported_graph.triples_matching(Some(&s_term), Any, Any).flatten().take(RELATION_ROWS_STEP) {
+                            let p = crate::rules::extract_str(&t.p());
+                            let o = crate::rules::extract_str(&t.o());
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(Self::get_label(&p)).size(11.0).color(egui::Color32::from_rgb(180, 150, 230)));
+                                ui.label("➔");
+                                ui.label(egui::RichText::new(Self::get_label(&o)).size(11.0));
+                            });
                         }
                     }
 
@@ -214,9 +184,10 @@ impl DarkstarApp {
                     ui.separator();
                     ui.label(egui::RichText::new("Incoming Relations (as Object)").size(11.0).strong());
                     let mut shown = 0usize;
-                    for t in self.manager.memory.asserted_graph.triples_matching(Any, Any, Some(&s_term)).flatten().chain(
-                        self.manager.memory.inferred_graph.triples_matching(Any, Any, Some(&s_term)).flatten()
-                    ) {
+                    for t in self.manager.memory.asserted_graph.triples_matching(Any, Any, Some(&s_term)).flatten()
+                        .chain(self.manager.memory.inferred_graph.triples_matching(Any, Any, Some(&s_term)).flatten())
+                        .chain(self.manager.memory.imported_graph.triples_matching(Any, Any, Some(&s_term)).flatten())
+                    {
                         shown += 1;
                         if shown > limits[2] {
                             if show_more_button(ui, limits[2]) { more_section = Some(2); }
@@ -253,6 +224,9 @@ impl DarkstarApp {
         });
         if let Some(k) = more_section {
             self.relation_limits[k] += RELATION_ROWS_STEP;
+        }
+        if let Some((s, p, o)) = explain_request {
+            self.request_explanation(&s, &p, &o);
         }
     }
 }

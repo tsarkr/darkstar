@@ -31,7 +31,7 @@ impl DarkstarApp {
     pub fn rebuild_classes_cache(&mut self) {
         if !self.classes_cache_dirty { return; }
         use sophia::api::term::matcher::Any;
-        let rdfs_subclass_of = InferenceEngine::make_term("http://www.w3.org/2000/01/rdf-schema#subClassOf");
+        let rdfs_subclass_of = InferenceEngine::make_term(crate::vocab::RDFS_SUBCLASS_OF);
         let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
         let mut all_classes = HashSet::new();
         let mut has_parent = HashSet::new();
@@ -46,8 +46,8 @@ impl DarkstarApp {
             has_parent.insert(child);
         }
 
-        let rdf_type = InferenceEngine::make_term("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
-        let owl_class = InferenceEngine::make_term("http://www.w3.org/2002/07/owl#Class");
+        let rdf_type = InferenceEngine::make_term(crate::vocab::RDF_TYPE);
+        let owl_class = InferenceEngine::make_term(crate::vocab::OWL_CLASS);
         let type_triples = self.manager.memory.main_graph.triples_matching(Any, Some(&rdf_type), Some(&owl_class));
         for t in type_triples.flatten() {
             all_classes.insert(crate::rules::extract_str(&t.s()));

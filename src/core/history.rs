@@ -24,6 +24,12 @@ pub struct ChangeHistory {
     redo_stack: Vec<DarkstarEvent>,
 }
 
+impl Default for ChangeHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChangeHistory {
     pub fn new() -> Self {
         Self {

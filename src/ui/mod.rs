@@ -3,6 +3,7 @@ pub mod dock;
 pub mod tabs;
 pub mod components;
 pub mod search;
+pub mod file_ops;
 
 use eframe::egui;
 use egui::Vec2;
@@ -93,5 +94,7 @@ pub enum DarkstarTab {
     History,
     EntityEditor,
     SourceEditor,
+    Sparql,
+    DlQuery,
     Plugin(String),
 }

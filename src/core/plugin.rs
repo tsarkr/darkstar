@@ -20,6 +20,12 @@ pub struct PluginManager {
     pub libraries: Vec<libloading::Library>,
 }
 
+impl Default for PluginManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PluginManager {
     pub fn new() -> Self {
         Self {

@@ -27,16 +27,10 @@ impl DarkstarApp {
     pub fn rebuild_individuals_cache(&mut self) {
         if !self.individuals_cache_dirty { return; }
         use sophia::api::term::matcher::Any;
-        let rdf_type = InferenceEngine::make_term("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
+        let rdf_type = InferenceEngine::make_term(crate::vocab::RDF_TYPE);
         let mut individuals_by_type: HashMap<String, Vec<String>> = HashMap::new();
-        let meta_classes: HashSet<_> = [
-            "i:http://www.w3.org/2002/07/owl#Class",
-            "i:http://www.w3.org/2000/01/rdf-schema#Class",
-            "i:http://www.w3.org/2002/07/owl#ObjectProperty",
-            "i:http://www.w3.org/2002/07/owl#DatatypeProperty",
-            "i:http://www.w3.org/1999/02/22-rdf-syntax-ns#Property",
-            "i:http://www.w3.org/2002/07/owl#Ontology",
-        ].into_iter().collect();
+        // Subjects typed with a schema type (class, property, ontology…) are not individuals.
+        let meta_classes: HashSet<String> = crate::vocab::META_TYPES.iter().map(|t| crate::vocab::iri(t)).collect();
 
         let mut known_meta = HashSet::new();
         let triples = self.manager.memory.main_graph.triples_matching(Any, Some(&rdf_type), Any);

@@ -121,29 +121,26 @@ impl DarkstarApp {
                                         self.graph_needs_sync = true;
                                         self.simulation_alpha = 20.0;
                                     }
-                                } else if self.filters.expansion_depth > 1 {
-                                    if ui.button("🔍 탐색 깊이 축소 (1단계)").on_hover_text("탐색 반경을 1단계로 줄여 주변 개체 수를 최소화합니다.").clicked() {
+                                } else if self.filters.expansion_depth > 1
+                                    && ui.button("🔍 탐색 깊이 축소 (1단계)").on_hover_text("탐색 반경을 1단계로 줄여 주변 개체 수를 최소화합니다.").clicked() {
                                         self.filters.expansion_depth = 1;
                                         self.graph_needs_sync = true;
                                         self.simulation_alpha = 20.0;
                                     }
-                                }
                                 
-                                if self.filters.show_schema {
-                                    if ui.button("🏢 클래스/프로퍼티 숨기기").on_hover_text("클래스와 프로퍼티 노드를 숨기고 개별 인디비주얼만 표시합니다.").clicked() {
+                                if self.filters.show_schema
+                                    && ui.button("🏢 클래스/프로퍼티 숨기기").on_hover_text("클래스와 프로퍼티 노드를 숨기고 개별 인디비주얼만 표시합니다.").clicked() {
                                         self.filters.show_schema = false;
                                         self.graph_needs_sync = true;
                                         self.simulation_alpha = 20.0;
                                     }
-                                }
                                 
-                                if self.filters.show_individuals && self.nodes.values().any(|n| n.node_type == NodeType::Individual) {
-                                    if ui.button("👥 인디비주얼 숨기기").on_hover_text("개별 인스턴스(인디비주얼) 노드를 숨기고 스키마 중심 구조만 표시합니다.").clicked() {
+                                if self.filters.show_individuals && self.nodes.values().any(|n| n.node_type == NodeType::Individual)
+                                    && ui.button("👥 인디비주얼 숨기기").on_hover_text("개별 인스턴스(인디비주얼) 노드를 숨기고 스키마 중심 구조만 표시합니다.").clicked() {
                                         self.filters.show_individuals = false;
                                         self.graph_needs_sync = true;
                                         self.simulation_alpha = 20.0;
                                     }
-                                }
                             });
                         });
                     });
@@ -299,7 +296,7 @@ impl DarkstarApp {
                     let max_displacement = 35.0;
                     let vel_len = vel.length();
                     if vel_len > max_displacement {
-                        vel = vel * (max_displacement / vel_len);
+                        vel *= max_displacement / vel_len;
                     }
 
                     let mut pos = positions[i];
@@ -469,7 +466,7 @@ impl DarkstarApp {
                         let p_start = p_start_orig + current_dir * d1;
                         let p_end = p_end_orig - current_dir * d2;
 
-                        let is_connected_to_active = active_node_uri.map_or(false, |a| edge.from == *a || edge.to == *a);
+                        let is_connected_to_active = active_node_uri.is_some_and(|a| edge.from == *a || edge.to == *a);
 
                         let (color, alpha, width) = if edge.is_inferred { 
                             let base_col = if self.settings.theme_dark { egui::Color32::from_rgb(52, 211, 153) } else { egui::Color32::from_rgb(16, 185, 129) };

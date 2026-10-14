@@ -6,3 +6,6 @@ pub mod graph;
 pub mod entity_editor;
 pub mod source_editor;
 pub mod history;
+pub mod query;
+pub mod explain_view;
+pub mod description;

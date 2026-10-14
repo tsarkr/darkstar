@@ -1,5 +1,8 @@
 mod memory;
+pub mod vocab;
+pub mod graph_util;
 mod rules;
+pub mod query;
 pub mod core;
 pub mod plugins;
 pub mod ui;

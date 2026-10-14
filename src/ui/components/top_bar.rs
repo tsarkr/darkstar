@@ -13,7 +13,7 @@ impl DarkstarApp {
                 ui.menu_button(i.file, |ui| {
                     if ui.button(i.new).clicked() { self.new_ontology_file(); ui.close_menu(); }
                     if ui.button(i.open).clicked() {
-                        if let Some(path) = rfd::FileDialog::new().add_filter("OWL/RDF", &["owl", "rdf", "ttl", "n3", "nt"]).pick_file() {
+                        if let Some(path) = rfd::FileDialog::new().add_filter("OWL/RDF", &["owl", "rdf", "xml", "ttl", "n3", "nt"]).pick_file() {
                             self.open_ontology_file(&path);
                         }
                         ui.close_menu();
@@ -41,55 +41,10 @@ impl DarkstarApp {
                     }
 
                     ui.separator();
-                    if ui.button(i.save).clicked() {
-                        if let Some(path) = self.manager.active_file_path.clone() {
-                            if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
-                                eprintln!("Save error: {}", e);
-                            } else {
-                                let is_korean = self.settings.language == Language::Korean;
-                                self.status_message = Some((
-                                    if is_korean { format!("'{}'에 저장되었습니다.", path.file_name().unwrap_or_default().to_string_lossy()) } else { format!("Saved to '{}'.", path.display()) },
-                                    std::time::Instant::now()
-                                ));
-                            }
-                        } else {
-                            if let Some(path) = rfd::FileDialog::new().set_file_name("ontology.ttl").add_filter("Turtle", &["ttl"]).save_file() {
-                                if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
-                                    eprintln!("Save error: {}", e);
-                                } else {
-                                    self.settings.add_recent(path.clone());
-                                    let is_korean = self.settings.language == Language::Korean;
-                                    self.status_message = Some((
-                                        if is_korean { format!("'{}'에 저장되었습니다.", path.file_name().unwrap_or_default().to_string_lossy()) } else { format!("Saved to '{}'.", path.display()) },
-                                        std::time::Instant::now()
-                                    ));
-                                }
-                            }
-                        }
-                        ui.close_menu();
-                    }
-                    if ui.button(i.save_as).clicked() {
-                        if let Some(path) = rfd::FileDialog::new().set_file_name("ontology.ttl").add_filter("Turtle", &["ttl"]).save_file() {
-                            if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, false) {
-                                eprintln!("Save error: {}", e);
-                            } else {
-                                self.settings.add_recent(path.clone());
-                                let is_korean = self.settings.language == Language::Korean;
-                                self.status_message = Some((
-                                    if is_korean { format!("'{}'에 저장되었습니다.", path.file_name().unwrap_or_default().to_string_lossy()) } else { format!("Saved to '{}'.", path.display()) },
-                                    std::time::Instant::now()
-                                ));
-                            }
-                        }
-                        ui.close_menu();
-                    }
+                    if ui.button(i.save).clicked() { self.save_current(); ui.close_menu(); }
+                    if ui.button(i.save_as).clicked() { self.save_as(); ui.close_menu(); }
                     ui.separator();
-                    if ui.button(i.export_inferred).clicked() {
-                        if let Some(path) = rfd::FileDialog::new().set_file_name("inferred.ttl").save_file() {
-                            if let Err(e) = self.manager.save_to_file(&path, crate::core::io::OntologyFormat::Turtle, true) { eprintln!("Export error: {}", e); }
-                        }
-                        ui.close_menu();
-                    }
+                    if ui.button(i.export_inferred).clicked() { self.export_inferred(); ui.close_menu(); }
                     ui.separator();
                     if ui.button(i.exit).clicked() { ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
                     ui.separator();
@@ -101,11 +56,15 @@ impl DarkstarApp {
                     if ui.button(i.undo).clicked() { self.manager.undo(); ui.close_menu(); }
                     if ui.button(i.redo).clicked() { self.manager.redo(); ui.close_menu(); }
                     ui.separator();
-                    if ui.add_enabled(false, egui::Button::new(i.cut)).clicked() {}
-                    if ui.add_enabled(false, egui::Button::new(i.copy)).clicked() {}
-                    if ui.add_enabled(false, egui::Button::new(i.paste)).clicked() {}
+                    ui.add_enabled(false, egui::Button::new(i.cut)); // not implemented yet
+                    ui.add_enabled(false, egui::Button::new(i.copy)); // not implemented yet
+                    ui.add_enabled(false, egui::Button::new(i.paste)); // not implemented yet
                     ui.separator();
-                    if ui.button(i.delete).clicked() { ui.close_menu(); }
+                    // Deletes the selected entity (same confirmation dialog as the editor's 🗑 button).
+                    if ui.add_enabled(self.selected_uri.is_some(), egui::Button::new(i.delete)).clicked() {
+                        self.confirm_delete_uri = self.selected_uri.clone();
+                        ui.close_menu();
+                    }
                 });
 
                 // 3. View Menu
@@ -149,6 +108,8 @@ impl DarkstarApp {
                         (DarkstarTab::Graph, i.graph_view),
                         (DarkstarTab::EntityEditor, i.property_editor),
                         (DarkstarTab::History, i.history),
+                        (DarkstarTab::Sparql, "SPARQL"),
+                        (DarkstarTab::DlQuery, "DL Query"),
                     ];
 
                     for (tab, label) in tabs {
@@ -164,7 +125,7 @@ impl DarkstarApp {
 
                     ui.separator();
                     if ui.button(i.reset_layout).clicked() {
-                        let mut new_dock = egui_dock::DockState::new(vec![DarkstarTab::Graph]);
+                        let mut new_dock = egui_dock::DockState::new(vec![DarkstarTab::Graph, DarkstarTab::SourceEditor, DarkstarTab::Sparql, DarkstarTab::DlQuery]);
                         let [left_and_center, _right] = new_dock.main_surface_mut().split_right(egui_dock::NodeIndex::root(), 0.8, vec![DarkstarTab::EntityEditor]);
                         let [_left, center] = new_dock.main_surface_mut().split_left(left_and_center, 0.2, vec![DarkstarTab::Classes]);
                         new_dock.main_surface_mut().split_below(center, 0.75, vec![DarkstarTab::Individuals, DarkstarTab::ObjectProperties, DarkstarTab::DataProperties, DarkstarTab::History]);

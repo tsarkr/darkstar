@@ -14,6 +14,12 @@ pub struct EntityStatsPlugin {
     dirty: bool,
 }
 
+impl Default for EntityStatsPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EntityStatsPlugin {
     pub fn new() -> Self {
         Self {
@@ -27,11 +33,11 @@ impl EntityStatsPlugin {
         self.total_triples = manager.memory.main_graph.triples().count();
         self.counts.clear();
 
-        let rdf_type = InferenceEngine::make_term("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
-        let owl_class = InferenceEngine::make_term("http://www.w3.org/2002/07/owl#Class");
-        let owl_obj_prop = InferenceEngine::make_term("http://www.w3.org/2002/07/owl#ObjectProperty");
-        let owl_data_prop = InferenceEngine::make_term("http://www.w3.org/2002/07/owl#DatatypeProperty");
-        let owl_individual = InferenceEngine::make_term("http://www.w3.org/2002/07/owl#NamedIndividual");
+        let rdf_type = InferenceEngine::make_term(crate::vocab::RDF_TYPE);
+        let owl_class = InferenceEngine::make_term(crate::vocab::OWL_CLASS);
+        let owl_obj_prop = InferenceEngine::make_term(crate::vocab::OWL_OBJECT_PROPERTY);
+        let owl_data_prop = InferenceEngine::make_term(crate::vocab::OWL_DATATYPE_PROPERTY);
+        let owl_individual = InferenceEngine::make_term(crate::vocab::OWL_NAMED_INDIVIDUAL);
 
         // Indexed (predicate, object) lookups instead of scanning every triple.
         use sophia::api::term::matcher::Any;

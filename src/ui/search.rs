@@ -9,7 +9,7 @@ impl DarkstarApp {
     /// so search can match human-readable labels (e.g. Korean names) and not only URIs.
     pub fn ensure_label_index(&mut self) {
         if self.label_index_revision == self.manager.revision { return; }
-        let rdfs_label = InferenceEngine::make_term("http://www.w3.org/2000/01/rdf-schema#label");
+        let rdfs_label = InferenceEngine::make_term(crate::vocab::RDFS_LABEL);
         let mut index: HashMap<String, String> = HashMap::new();
         for t in self.manager.memory.main_graph.triples_matching(Any, Some(&rdfs_label), Any).flatten() {
             let Some(lex) = t.o().lexical_form() else { continue };
@@ -27,6 +27,6 @@ impl DarkstarApp {
         if query.is_empty() { return true; }
         display_label.to_lowercase().contains(query)
             || uri.to_lowercase().contains(query)
-            || self.label_index.get(uri).map_or(false, |l| l.contains(query))
+            || self.label_index.get(uri).is_some_and(|l| l.contains(query))
     }
 }
