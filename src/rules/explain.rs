@@ -149,7 +149,9 @@ impl<'a> Explainer<'a> {
     /// 0 for asserted / imported, the derivation iteration for inferred, MAX if absent.
     fn level(&self, f: &Fact) -> u32 {
         if self.contains(&self.mem.asserted_graph, f) || self.contains(&self.mem.imported_graph, f) { return 0; }
-        self.mem.inferred_level.get(f).copied().unwrap_or(u32::MAX)
+        if let Some(&lvl) = self.mem.inferred_level.get(f) { return lvl; }
+        if self.contains(&self.mem.inferred_graph, f) { return 1; }
+        u32::MAX
     }
 
     // --- small graph helpers over the full (materialized) graph ---
@@ -356,7 +358,13 @@ impl<'a> Explainer<'a> {
             self.nodes.push(Node { fact: f, origin: Origin::Truncated });
             return self.nodes.len() - 1;
         }
-        let level = self.mem.inferred_level.get(&f).copied();
+        let level = self.mem.inferred_level.get(&f).copied().or_else(|| {
+            if self.contains(&self.mem.inferred_graph, &f) {
+                Some(1)
+            } else {
+                None
+            }
+        });
         let origin = if self.contains(&self.mem.asserted_graph, &f) {
             Origin::Asserted
         } else if self.contains(&self.mem.imported_graph, &f) {

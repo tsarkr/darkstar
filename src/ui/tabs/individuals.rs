@@ -27,28 +27,35 @@ impl DarkstarApp {
     pub fn rebuild_individuals_cache(&mut self) {
         if !self.individuals_cache_dirty { return; }
         use sophia::api::term::matcher::Any;
+        let g = &self.manager.memory.main_graph;
         let rdf_type = InferenceEngine::make_term(crate::vocab::RDF_TYPE);
         let mut individuals_by_type: HashMap<String, Vec<String>> = HashMap::new();
-        // Subjects typed with a schema type (class, property, ontology…) are not individuals.
-        let meta_classes: HashSet<String> = crate::vocab::META_TYPES.iter().map(|t| crate::vocab::iri(t)).collect();
 
-        let mut known_meta = HashSet::new();
-        let triples = self.manager.memory.main_graph.triples_matching(Any, Some(&rdf_type), Any);
+        // 1. Collect meta-entities (classes, properties, ontologies) via indexed object lookups
+        let mut known_meta: HashSet<String> = HashSet::new();
+        for &meta_iri in crate::vocab::META_TYPES {
+            let meta_term = InferenceEngine::make_term(meta_iri);
+            for t in g.triples_matching(Any, Some(&rdf_type), Some(&meta_term)).flatten() {
+                known_meta.insert(crate::rules::extract_str(&t.s()));
+            }
+        }
+        let meta_classes: HashSet<&'static str> = crate::vocab::META_TYPES.iter().copied().collect();
 
-        let mut candidates = Vec::new();
-        for t in triples.flatten() {
+        // 2. Group non-meta typed subjects by class
+        for t in g.triples_matching(Any, Some(&rdf_type), Any).flatten() {
+            if let Some(o_iri) = t.o().iri() {
+                if meta_classes.contains(o_iri.as_str()) { continue; }
+            }
             let s = crate::rules::extract_str(&t.s());
+            if known_meta.contains(&s) { continue; }
             let o = crate::rules::extract_str(&t.o());
-            if meta_classes.contains(o.as_str()) { known_meta.insert(s); }
-            else { candidates.push((s, o)); }
+            individuals_by_type.entry(o).or_default().push(s);
         }
 
-        for (s, o) in candidates {
-            if !known_meta.contains(&s) { individuals_by_type.entry(o).or_default().push(s); }
-        }
-        // Sort once here instead of cloning + sorting every frame.
+        // Sort and deduplicate once here instead of cloning + sorting every frame.
         for inds in individuals_by_type.values_mut() {
             inds.sort_unstable();
+            inds.dedup();
         }
 
         self.individuals_by_type = individuals_by_type;
@@ -69,22 +76,43 @@ impl DarkstarApp {
         let mut rows = Vec::new();
         for type_uri in types {
             let inds = &self.individuals_by_type[type_uri];
-            let matching: Vec<(&String, String)> = inds
-                .iter()
-                .map(|ind| (ind, Self::get_label(ind)))
-                .filter(|(ind, label)| self.matches_search(ind, label, &query))
-                .collect();
-
-            if matching.is_empty() && !query.is_empty() { continue; }
-
             let collapsed = self.collapsed_types.contains(type_uri);
-            rows.push(IndividualRow::Header {
-                type_uri: type_uri.clone(),
-                text: format!("{} {} ({})", i.type_label, Self::get_label(type_uri), matching.len()),
-                collapsed,
-            });
-            if !collapsed {
-                rows.extend(matching.into_iter().map(|(uri, label)| IndividualRow::Item { uri: uri.clone(), label }));
+
+            if query.is_empty() {
+                rows.push(IndividualRow::Header {
+                    type_uri: type_uri.clone(),
+                    text: format!("{} {} ({})", i.type_label, Self::get_label(type_uri), inds.len()),
+                    collapsed,
+                });
+                if !collapsed {
+                    rows.extend(inds.iter().map(|uri| IndividualRow::Item {
+                        uri: uri.clone(),
+                        label: Self::get_label(uri),
+                    }));
+                }
+            } else if collapsed {
+                let match_count = inds.iter().filter(|ind| self.matches_uri_search(ind, &query)).count();
+                if match_count == 0 { continue; }
+                rows.push(IndividualRow::Header {
+                    type_uri: type_uri.clone(),
+                    text: format!("{} {} ({})", i.type_label, Self::get_label(type_uri), match_count),
+                    collapsed: true,
+                });
+            } else {
+                let matching: Vec<&String> = inds
+                    .iter()
+                    .filter(|ind| self.matches_uri_search(ind, &query))
+                    .collect();
+                if matching.is_empty() { continue; }
+                rows.push(IndividualRow::Header {
+                    type_uri: type_uri.clone(),
+                    text: format!("{} {} ({})", i.type_label, Self::get_label(type_uri), matching.len()),
+                    collapsed: false,
+                });
+                rows.extend(matching.into_iter().map(|uri| IndividualRow::Item {
+                    uri: uri.clone(),
+                    label: Self::get_label(uri),
+                }));
             }
         }
 

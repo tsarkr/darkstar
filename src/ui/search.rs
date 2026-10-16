@@ -21,12 +21,40 @@ impl DarkstarApp {
         self.label_index_revision = self.manager.revision;
     }
 
+    /// Zero-allocation case-insensitive substring check (`needle_lower` must already be lowercased).
+    #[inline]
+    pub fn contains_case_insensitive(haystack: &str, needle_lower: &str) -> bool {
+        if needle_lower.is_empty() {
+            return true;
+        }
+        if needle_lower.len() > haystack.len() {
+            return false;
+        }
+        if haystack.is_ascii() && needle_lower.is_ascii() {
+            let n = needle_lower.as_bytes();
+            haystack.as_bytes().windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+        } else if haystack.contains(needle_lower) {
+            true
+        } else {
+            haystack.to_lowercase().contains(needle_lower)
+        }
+    }
+
     /// `query` must already be lowercased. Matches the display label, the URI and any rdfs:label.
     /// Call `ensure_label_index` first when the query is non-empty.
     pub fn matches_search(&self, uri: &str, display_label: &str, query: &str) -> bool {
         if query.is_empty() { return true; }
-        display_label.to_lowercase().contains(query)
-            || uri.to_lowercase().contains(query)
+        Self::contains_case_insensitive(display_label, query)
+            || Self::contains_case_insensitive(uri, query)
+            || self.label_index.get(uri).is_some_and(|l| l.contains(query))
+    }
+
+    /// `query` must already be lowercased. Matches the URI (which includes its local name) and any rdfs:label
+    /// without allocating a display label `String`.
+    #[inline]
+    pub fn matches_uri_search(&self, uri: &str, query: &str) -> bool {
+        if query.is_empty() { return true; }
+        Self::contains_case_insensitive(uri, query)
             || self.label_index.get(uri).is_some_and(|l| l.contains(query))
     }
 }

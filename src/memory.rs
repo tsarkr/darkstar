@@ -41,8 +41,16 @@ pub fn normalize_term(t: &str) -> String {
     if t.starts_with("i:") || t.starts_with("l:") || t.starts_with("b:") { t.to_string() } else { format!("i:{}", t) }
 }
 
+pub fn normalize_term_owned(t: String) -> String {
+    if t.starts_with("i:") || t.starts_with("l:") || t.starts_with("b:") { t } else { format!("i:{}", t) }
+}
+
 pub fn normalize_fact(f: &Fact) -> Fact {
     Fact { s: normalize_term(&f.s), p: normalize_term(&f.p), o: normalize_term(&f.o) }
+}
+
+pub fn normalize_fact_owned(f: Fact) -> Fact {
+    Fact { s: normalize_term_owned(f.s), p: normalize_term_owned(f.p), o: normalize_term_owned(f.o) }
 }
 
 impl EngineMemory {

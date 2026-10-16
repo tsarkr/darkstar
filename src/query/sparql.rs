@@ -33,30 +33,34 @@ pub struct SparqlOutput {
 // Term conversion (sophia <-> oxrdf)
 // ---------------------------------------------------------------------------
 
-fn to_ox<T: sophia::api::term::Term>(t: T) -> Term {
-    if let Some(iri) = t.iri() {
-        NamedNode::new_unchecked(iri.as_str()).into()
-    } else if let Some(b) = t.bnode_id() {
-        BlankNode::new_unchecked(b.as_str()).into()
-    } else if let Some(lex) = t.lexical_form() {
-        if let Some(lang) = t.language_tag() {
+fn to_ox(t: &SimpleTerm<'_>) -> Term {
+    match t {
+        SimpleTerm::Iri(iri) => NamedNode::new_unchecked(iri.as_str()).into(),
+        SimpleTerm::BlankNode(b) => BlankNode::new_unchecked(b.as_str()).into(),
+        SimpleTerm::LiteralLanguage(lex, lang) => {
             Literal::new_language_tagged_literal_unchecked(lex.as_ref(), lang.as_str()).into()
-        } else {
-            let dt = t.datatype().map(|d| d.as_str().to_string()).unwrap_or_else(|| crate::vocab::XSD_STRING.into());
-            Literal::new_typed_literal(lex.as_ref(), NamedNode::new_unchecked(dt)).into()
         }
-    } else {
-        BlankNode::new_unchecked("anon").into()
+        SimpleTerm::LiteralDatatype(lex, dt) => {
+            Literal::new_typed_literal(lex.as_ref(), NamedNode::new_unchecked(dt.as_str())).into()
+        }
+        _ => BlankNode::new_unchecked("anon").into(),
     }
 }
 
 fn to_sophia(t: &Term) -> Option<SimpleTerm<'static>> {
+    use crate::rules::engine::InferenceEngine;
     Some(match t {
-        Term::NamedNode(n) => SimpleTerm::Iri(IriRef::new_unchecked(n.as_str().to_string().into())),
-        Term::BlankNode(b) => SimpleTerm::BlankNode(BnodeId::new_unchecked(b.as_str().to_string().into())),
+        Term::NamedNode(n) => SimpleTerm::Iri(IriRef::new_unchecked(InferenceEngine::intern(n.as_str()).into())),
+        Term::BlankNode(b) => SimpleTerm::BlankNode(BnodeId::new_unchecked(InferenceEngine::intern(b.as_str()).into())),
         Term::Literal(l) => match l.language() {
-            Some(lang) => SimpleTerm::LiteralLanguage(l.value().to_string().into(), LanguageTag::new_unchecked(lang.to_string().into())),
-            None => SimpleTerm::LiteralDatatype(l.value().to_string().into(), IriRef::new_unchecked(l.datatype().as_str().to_string().into())),
+            Some(lang) => SimpleTerm::LiteralLanguage(
+                InferenceEngine::intern(l.value()).into(),
+                LanguageTag::new_unchecked(InferenceEngine::intern(lang).into()),
+            ),
+            None => SimpleTerm::LiteralDatatype(
+                InferenceEngine::intern(l.value()).into(),
+                IriRef::new_unchecked(InferenceEngine::intern(l.datatype().as_str()).into()),
+            ),
         },
         #[allow(unreachable_patterns)]
         _ => return None,
@@ -86,11 +90,46 @@ pub fn term_to_darkstar(t: &Term) -> String {
 // Dataset adapter
 // ---------------------------------------------------------------------------
 
-/// Term matcher where `None` is a wildcard (sophia's `Option` matcher treats `None` as "nothing").
-struct Slot(Option<SimpleTerm<'static>>);
+/// Lightweight SPARQL internal term that borrows `&'a SimpleTerm<'static>` directly
+/// from `FastGraph` during triple scans (copying an 8-byte reference on `.clone()`)
+/// and only owns a `SimpleTerm<'static>` for constants internalized from the query AST.
+#[derive(Clone)]
+pub enum SparqlTerm<'a> {
+    Borrowed(&'a SimpleTerm<'static>),
+    Owned(SimpleTerm<'static>),
+}
 
-impl sophia::api::term::matcher::TermMatcher for Slot {
-    type Term = SimpleTerm<'static>;
+impl<'a> SparqlTerm<'a> {
+    #[inline]
+    fn as_simple(&self) -> &SimpleTerm<'static> {
+        match self {
+            SparqlTerm::Borrowed(t) => t,
+            SparqlTerm::Owned(t) => t,
+        }
+    }
+}
+
+impl<'a> PartialEq for SparqlTerm<'a> {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_simple() == other.as_simple()
+    }
+}
+
+impl<'a> Eq for SparqlTerm<'a> {}
+
+impl<'a> std::hash::Hash for SparqlTerm<'a> {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(self.as_simple(), state)
+    }
+}
+
+/// Term matcher where `None` is a wildcard (sophia's `Option` matcher treats `None` as "nothing").
+struct Slot<'a>(Option<SimpleTerm<'a>>);
+
+impl<'a> sophia::api::term::matcher::TermMatcher for Slot<'a> {
+    type Term = SimpleTerm<'a>;
     fn matches<T2: sophia::api::term::Term + ?Sized>(&self, term: &T2) -> bool {
         match &self.0 {
             Some(mine) => sophia::api::term::Term::eq(mine, term.borrow_term()),
@@ -109,43 +148,51 @@ pub struct GraphDataset<'a> {
 }
 
 impl<'a> QueryableDataset<'a> for GraphDataset<'a> {
-    type InternalTerm = Term;
+    type InternalTerm = SparqlTerm<'a>;
     type Error = Infallible;
 
     fn internal_quads_for_pattern(
         &self,
-        subject: Option<&Term>,
-        predicate: Option<&Term>,
-        object: Option<&Term>,
-        graph_name: Option<Option<&Term>>,
-    ) -> impl Iterator<Item = Result<InternalQuad<Term>, Infallible>> + use<'a> {
-        // Only the default graph exists. A bound term that can't exist in the graph
-        // (e.g. a literal in subject position) yields nothing.
+        subject: Option<&SparqlTerm<'a>>,
+        predicate: Option<&SparqlTerm<'a>>,
+        object: Option<&SparqlTerm<'a>>,
+        graph_name: Option<Option<&SparqlTerm<'a>>>,
+    ) -> impl Iterator<Item = Result<InternalQuad<SparqlTerm<'a>>, Infallible>> + use<'a> {
+        // Only the default graph exists.
         // `Some(None)` = the default graph. spareval also asks with `None` when the default graph
         // is "the union of all graphs" (no FROM clause); here that union is just our one graph.
         let in_default = matches!(graph_name, Some(None) | None);
-        let conv = |t: Option<&Term>| -> Result<Option<SimpleTerm<'static>>, ()> {
-            match t { None => Ok(None), Some(t) => to_sophia(t).map(Some).ok_or(()) }
-        };
-        let pattern = match (conv(subject), conv(predicate), conv(object)) {
-            (Ok(s), Ok(p), Ok(o)) if in_default => Some((s, p, o)),
-            _ => None,
+        let pattern = if in_default {
+            Some((
+                subject.map(|t| t.as_simple().clone()),
+                predicate.map(|t| t.as_simple().clone()),
+                object.map(|t| t.as_simple().clone()),
+            ))
+        } else {
+            None
         };
         let graph = self.graph;
         pattern.into_iter().flat_map(move |(s, p, o)| {
             graph.triples_matching(Slot(s), Slot(p), Slot(o)).flatten().map(|t| {
                 Ok(InternalQuad {
-                    subject: to_ox(t.s()),
-                    predicate: to_ox(t.p()),
-                    object: to_ox(t.o()),
+                    subject: SparqlTerm::Borrowed(t[0]),
+                    predicate: SparqlTerm::Borrowed(t[1]),
+                    object: SparqlTerm::Borrowed(t[2]),
                     graph_name: None,
                 })
             })
         })
     }
 
-    fn internalize_term(&self, term: Term) -> Result<Term, Infallible> { Ok(term) }
-    fn externalize_term(&self, term: Term) -> Result<Term, Infallible> { Ok(term) }
+    fn internalize_term(&self, term: Term) -> Result<SparqlTerm<'a>, Infallible> {
+        Ok(SparqlTerm::Owned(
+            to_sophia(&term).unwrap_or_else(|| SimpleTerm::BlankNode(BnodeId::new_unchecked("anon".into()))),
+        ))
+    }
+
+    fn externalize_term(&self, term: SparqlTerm<'a>) -> Result<Term, Infallible> {
+        Ok(to_ox(term.as_simple()))
+    }
 }
 
 /// Parses and evaluates a SPARQL query over `graph`.

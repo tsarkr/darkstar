@@ -15,11 +15,67 @@ impl DarkstarApp {
         let mut node_types = HashMap::new();
 
         use crate::vocab as v;
-        let owl_class = v::iri(v::OWL_CLASS);
-        let rdfs_class = v::iri(v::RDFS_CLASS);
-        let owl_obj_prop = v::iri(v::OWL_OBJECT_PROPERTY);
-        let owl_data_prop = v::iri(v::OWL_DATATYPE_PROPERTY);
-        let owl_individual = v::iri(v::OWL_NAMED_INDIVIDUAL);
+        use sophia::api::term::matcher::Any;
+        let g_main = &self.manager.memory.main_graph;
+        let rdf_type_term = crate::rules::engine::InferenceEngine::make_term(v::RDF_TYPE);
+        let rdfs_subclass_term = crate::rules::engine::InferenceEngine::make_term(v::RDFS_SUBCLASS_OF);
+        let rdfs_subprop_term = crate::rules::engine::InferenceEngine::make_term(v::RDFS_SUBPROPERTY_OF);
+
+        // 1. Classify all schema entities (classes & properties) via indexed lookups in O(|schema|)
+        for class_iri in [v::OWL_CLASS, v::RDFS_CLASS] {
+            let cls_term = crate::rules::engine::InferenceEngine::make_term(class_iri);
+            for t in g_main.triples_matching(Any, Some(&rdf_type_term), Some(&cls_term)).flatten() {
+                node_types.insert(crate::rules::extract_str(&t.s()), NodeType::Class);
+            }
+        }
+        for t in g_main.triples_matching(Any, Some(&rdfs_subclass_term), Any).flatten() {
+            node_types.insert(crate::rules::extract_str(&t.s()), NodeType::Class);
+            node_types.insert(crate::rules::extract_str(&t.o()), NodeType::Class);
+        }
+        for prop_iri in [v::OWL_OBJECT_PROPERTY, v::OWL_DATATYPE_PROPERTY] {
+            let prop_term = crate::rules::engine::InferenceEngine::make_term(prop_iri);
+            for t in g_main.triples_matching(Any, Some(&rdf_type_term), Some(&prop_term)).flatten() {
+                node_types.insert(crate::rules::extract_str(&t.s()), NodeType::Property);
+            }
+        }
+        for t in g_main.triples_matching(Any, Some(&rdfs_subprop_term), Any).flatten() {
+            node_types.insert(crate::rules::extract_str(&t.s()), NodeType::Property);
+            node_types.insert(crate::rules::extract_str(&t.o()), NodeType::Property);
+        }
+
+        let classify_node = |uri: &str, node_types: &HashMap<String, NodeType>| -> NodeType {
+            if uri.starts_with("l:") {
+                NodeType::Literal
+            } else if uri.starts_with("b:") || uri.starts_with("_:") {
+                NodeType::Blank
+            } else {
+                *node_types.get(uri).unwrap_or(&NodeType::Individual)
+            }
+        };
+
+        let is_system = |p: &str| -> bool {
+            p.contains("/22-rdf-syntax-ns#")
+                || p.contains("/owl#")
+                || p.contains("/rdf-schema#")
+                || Self::contains_case_insensitive(p, "#type")
+                || Self::contains_case_insensitive(p, "#first")
+                || Self::contains_case_insensitive(p, "#rest")
+                || Self::contains_case_insensitive(p, "#onproperty")
+                || Self::contains_case_insensitive(p, "#somevaluesfrom")
+                || Self::contains_case_insensitive(p, "#allvaluesfrom")
+                || Self::contains_case_insensitive(p, "#unionof")
+                || Self::contains_case_insensitive(p, "#intersectionof")
+                || Self::contains_case_insensitive(p, "#oneof")
+                || Self::contains_case_insensitive(p, "#inverseof")
+                || Self::contains_case_insensitive(p, "#equivalentclass")
+                || Self::contains_case_insensitive(p, "#equivalentproperty")
+                || Self::contains_case_insensitive(p, "#namedindividual")
+                || Self::contains_case_insensitive(p, "#ontology")
+                || Self::contains_case_insensitive(p, "#imports")
+                || p.ends_with("/type")
+                || p.ends_with("/first")
+                || p.ends_with("/rest")
+        };
 
         // Reset the "show more" limit whenever the focused entity changes.
         if self.focus_limit_uri != self.selected_uri {
@@ -41,10 +97,6 @@ impl DarkstarApp {
             let mut queue = std::collections::VecDeque::new();
             for r in roots { queue.push_back((r, 0)); }
 
-            // Hub nodes (e.g. a class with 100k+ instances) would otherwise pull every neighbour
-            // into the view, and layout/force simulation is O(n^2). Exploration stops at `limit`.
-            // When a search query is active, neighbours matching it are taken first, so a
-            // searched entity still shows up even if it sits behind a hub.
             while let Some((u, d)) = queue.pop_front() {
                 if visible_in_focus.len() >= limit {
                     truncated = true;
@@ -53,34 +105,50 @@ impl DarkstarApp {
                 if !visible_in_focus.insert(u.clone()) { continue; }
                 if d >= self.filters.expansion_depth { continue; }
 
-                // How many more neighbours are worth queueing from this node.
                 let budget = (limit * 2).saturating_sub(queue.len() + visible_in_focus.len());
                 let mut matched: Vec<String> = Vec::new();
                 let mut others: Vec<String> = Vec::new();
+                let mut scanned = 0usize;
+                let max_hub_scan = 10_000usize;
 
-                let graphs = [&self.manager.memory.asserted_graph, &self.manager.memory.inferred_graph, &self.manager.memory.imported_graph];
                 let u_term = crate::rules::engine::InferenceEngine::make_term(&u);
-                'neigh: for g in graphs {
-                    let outgoing = g.triples_matching(Some(&u_term), sophia::api::term::matcher::Any, sophia::api::term::matcher::Any)
-                        .flatten().map(|t| crate::rules::extract_str(&t.o()));
-                    let incoming = g.triples_matching(sophia::api::term::matcher::Any, sophia::api::term::matcher::Any, Some(&u_term))
-                        .flatten().map(|t| crate::rules::extract_str(&t.s()));
-                    for n in outgoing.chain(incoming) {
+                let graphs: [&crate::memory::DarkstarGraph; 3] = [
+                    &self.manager.memory.asserted_graph,
+                    &self.manager.memory.inferred_graph,
+                    &self.manager.memory.imported_graph,
+                ];
+                'neigh: for (g_idx, g) in graphs.iter().enumerate() {
+                    if g_idx == 1 && !self.filters.show_inferred { continue; }
+                    let outgoing = g.triples_matching(Some(&u_term), Any, Any)
+                        .flatten().map(|t| (crate::rules::extract_str(&t.p()), crate::rules::extract_str(&t.o())));
+                    let incoming = g.triples_matching(Any, Any, Some(&u_term))
+                        .flatten().map(|t| (crate::rules::extract_str(&t.p()), crate::rules::extract_str(&t.s())));
+                    for (p, n) in outgoing.chain(incoming) {
+                        if !self.filters.show_system && is_system(&p) { continue; }
+                        let n_type = classify_node(&n, &node_types);
+                        if !self.filters.show_literals && n_type == NodeType::Literal { continue; }
+                        if !self.filters.show_schema && (n_type == NodeType::Class || n_type == NodeType::Property) { continue; }
+                        if !self.filters.show_individuals && n_type == NodeType::Individual { continue; }
+
+                        scanned += 1;
                         if query.is_empty() {
                             if others.len() >= budget { truncated = true; break 'neigh; }
                             others.push(n);
-                        } else if self.matches_search(&n, &Self::get_label(&n), &query) {
+                        } else if self.matches_uri_search(&n, &query) {
                             if matched.len() < budget { matched.push(n); } else { truncated = true; }
                         } else if others.len() < budget {
                             others.push(n);
                         } else {
                             truncated = true;
-                            if matched.len() >= budget { break 'neigh; }
+                            if matched.len() >= budget || scanned >= max_hub_scan { break 'neigh; }
+                        }
+                        if scanned >= max_hub_scan {
+                            truncated = true;
+                            break 'neigh;
                         }
                     }
                 }
 
-                // Matches jump the queue; the rest fill whatever budget remains.
                 let remaining = budget.saturating_sub(matched.len());
                 for n in matched.into_iter().rev() { queue.push_front((n, d + 1)); }
                 for n in others.into_iter().take(remaining) { queue.push_back((n, d + 1)); }
@@ -88,81 +156,31 @@ impl DarkstarApp {
         }
         self.graph_truncated = truncated;
 
-        // Build node types on-demand for visible nodes (or a capped sample of nodes if focus_mode is disabled)
-        let nodes_for_typing: HashSet<String> = if self.filters.focus_mode {
-            visible_in_focus.clone()
-        } else {
-            let mut sample_nodes = HashSet::new();
-            for t in self.manager.memory.asserted_graph.triples().flatten().take(1000) {
-                sample_nodes.insert(crate::rules::extract_str(&t.s()));
-                sample_nodes.insert(crate::rules::extract_str(&t.o()));
-            }
-            sample_nodes
-        };
-
-        for uri in &nodes_for_typing {
-            if uri.starts_with("_:") || uri.starts_with("b:") {
-                node_types.insert(uri.clone(), NodeType::Blank);
-                continue;
-            }
-            if uri.starts_with("l:") {
-                node_types.insert(uri.clone(), NodeType::Literal);
-                continue;
-            }
-
-            let uri_term = crate::rules::engine::InferenceEngine::make_term(uri);
-            let rdf_type_term = crate::rules::engine::InferenceEngine::make_term(crate::vocab::RDF_TYPE);
-            let type_triples = self.manager.memory.main_graph.triples_matching(Some(&uri_term), Some(&rdf_type_term), sophia::api::term::matcher::Any);
-            for t in type_triples.flatten() {
-                let o = crate::rules::extract_str(&t.o());
-                if o == owl_class || o == rdfs_class {
-                    node_types.insert(uri.clone(), NodeType::Class);
-                } else if o == owl_obj_prop || o == owl_data_prop {
-                    node_types.insert(uri.clone(), NodeType::Property);
-                } else if o == owl_individual {
-                    node_types.insert(uri.clone(), NodeType::Individual);
-                }
-            }
-        }
-        
-        let is_system = |p: &str| {
-            let p_low = p.to_lowercase();
-            p_low.contains("#type") || p_low.contains("#first") || p_low.contains("#rest") || 
-            p_low.contains("#onproperty") || p_low.contains("#somevaluesfrom") || p_low.contains("#allvaluesfrom") ||
-            p_low.contains("#unionof") || p_low.contains("#intersectionof") || p_low.contains("#oneof") ||
-            p_low.contains("#inverseof") || p_low.contains("#equivalentclass") || p_low.contains("#equivalentproperty") ||
-            p_low.contains("#namedindividual") || p_low.contains("#ontology") || p_low.contains("#imports") ||
-            p_low.contains("/22-rdf-syntax-ns#") || p_low.contains("/owl#") || p_low.contains("/rdf-schema#") ||
-            p_low.ends_with("/type") || p_low.ends_with("/first") || p_low.ends_with("/rest")
-        };
-
         let mut seen_triples = HashSet::new();
         
         if self.filters.focus_mode {
             let graphs = [&self.manager.memory.asserted_graph, &self.manager.memory.inferred_graph, &self.manager.memory.imported_graph];
-            for &g in &graphs {
-                let is_inferred = std::ptr::eq(g, &self.manager.memory.inferred_graph);
+            for (g_idx, &g) in graphs.iter().enumerate() {
+                let is_inferred = g_idx == 1;
+                if is_inferred && !self.filters.show_inferred { continue; }
                 for u in &visible_in_focus {
                     let u_term = crate::rules::engine::InferenceEngine::make_term(u);
-                    for t in g.triples_matching(Some(&u_term), sophia::api::term::matcher::Any, sophia::api::term::matcher::Any).flatten() {
-                        let s = u.clone();
-                        let p = crate::rules::extract_str(&t.p());
+                    for t in g.triples_matching(Some(&u_term), Any, Any).flatten() {
                         let o = crate::rules::extract_str(&t.o());
-                        let is_o_literal = t.o().lexical_form().is_some() && t.o().iri().is_none();
-                        
                         if !visible_in_focus.contains(&o) { continue; }
-                        
-                        let key = (s.clone(), p.clone(), o.clone());
-                        if seen_triples.contains(&key) { continue; }
-                        seen_triples.insert(key);
+                        let p = crate::rules::extract_str(&t.p());
+                        if !self.filters.show_system && is_system(&p) { continue; }
 
-                        let s_type = *node_types.get(&s).unwrap_or(&NodeType::Individual);
-                        let o_type = if is_o_literal { NodeType::Literal } else { *node_types.get(&o).unwrap_or(&NodeType::Individual) };
+                        let s_type = classify_node(u, &node_types);
+                        let o_type = classify_node(&o, &node_types);
 
                         if !self.filters.show_literals && o_type == NodeType::Literal { continue; }
                         if !self.filters.show_schema && (s_type == NodeType::Class || o_type == NodeType::Class || s_type == NodeType::Property) { continue; }
                         if !self.filters.show_individuals && (s_type == NodeType::Individual || o_type == NodeType::Individual) { continue; }
-                        if !self.filters.show_system && is_system(&p) { continue; }
+
+                        let s = u.clone();
+                        let key = (s.clone(), p.clone(), o.clone());
+                        if !seen_triples.insert(key) { continue; }
 
                         seen_nodes.insert(s.clone());
                         seen_nodes.insert(o.clone());
@@ -176,22 +194,24 @@ impl DarkstarApp {
 
             for t in self.manager.memory.asserted_graph.triples().flatten() {
                 if edge_count >= max_edges { break; }
-                let s = crate::rules::extract_str(&t.s());
-                let p = crate::rules::extract_str(&t.p());
-                let o = crate::rules::extract_str(&t.o());
                 let is_o_literal = t.o().lexical_form().is_some() && t.o().iri().is_none();
-                
-                let key = (s.clone(), p.clone(), o.clone());
-                if seen_triples.contains(&key) { continue; }
-                seen_triples.insert(key);
+                if !self.filters.show_literals && is_o_literal { continue; }
 
-                let s_type = *node_types.get(&s).unwrap_or(&NodeType::Individual);
-                let o_type = if is_o_literal { NodeType::Literal } else { *node_types.get(&o).unwrap_or(&NodeType::Individual) };
-
-                if !self.filters.show_literals && o_type == NodeType::Literal { continue; }
-                if !self.filters.show_schema && (s_type == NodeType::Class || o_type == NodeType::Class || s_type == NodeType::Property) { continue; }
-                if !self.filters.show_individuals && (s_type == NodeType::Individual || o_type == NodeType::Individual) { continue; }
+                let p = crate::rules::extract_str(&t.p());
                 if !self.filters.show_system && is_system(&p) { continue; }
+
+                let s = crate::rules::extract_str(&t.s());
+                let s_type = classify_node(&s, &node_types);
+                if !self.filters.show_individuals && s_type == NodeType::Individual { continue; }
+                if !self.filters.show_schema && (s_type == NodeType::Class || s_type == NodeType::Property) { continue; }
+
+                let o = crate::rules::extract_str(&t.o());
+                let o_type = if is_o_literal { NodeType::Literal } else { classify_node(&o, &node_types) };
+                if !self.filters.show_individuals && o_type == NodeType::Individual { continue; }
+                if !self.filters.show_schema && o_type == NodeType::Class { continue; }
+
+                let key = (s.clone(), p.clone(), o.clone());
+                if !seen_triples.insert(key) { continue; }
 
                 seen_nodes.insert(s.clone());
                 seen_nodes.insert(o.clone());
@@ -202,23 +222,25 @@ impl DarkstarApp {
             if self.filters.show_inferred {
                 for t in self.manager.memory.inferred_graph.triples().flatten() {
                     if edge_count >= max_edges { break; }
-                    if !self.manager.memory.asserted_graph.contains(t.s(), t.p(), t.o()).unwrap() {
-                        let s = crate::rules::extract_str(&t.s());
-                        let p = crate::rules::extract_str(&t.p());
-                        let o = crate::rules::extract_str(&t.o());
-                        let is_o_literal = t.o().lexical_form().is_some() && t.o().iri().is_none();
+                    let is_o_literal = t.o().lexical_form().is_some() && t.o().iri().is_none();
+                    if !self.filters.show_literals && is_o_literal { continue; }
 
+                    let p = crate::rules::extract_str(&t.p());
+                    if !self.filters.show_system && is_system(&p) { continue; }
+
+                    let s = crate::rules::extract_str(&t.s());
+                    let s_type = classify_node(&s, &node_types);
+                    if !self.filters.show_individuals && s_type == NodeType::Individual { continue; }
+                    if !self.filters.show_schema && (s_type == NodeType::Class || s_type == NodeType::Property) { continue; }
+
+                    let o = crate::rules::extract_str(&t.o());
+                    let o_type = if is_o_literal { NodeType::Literal } else { classify_node(&o, &node_types) };
+                    if !self.filters.show_individuals && o_type == NodeType::Individual { continue; }
+                    if !self.filters.show_schema && o_type == NodeType::Class { continue; }
+
+                    if !self.manager.memory.asserted_graph.contains(t.s(), t.p(), t.o()).unwrap_or(false) {
                         let key = (s.clone(), p.clone(), o.clone());
-                        if seen_triples.contains(&key) { continue; }
-                        seen_triples.insert(key);
-
-                        let s_type = *node_types.get(&s).unwrap_or(&NodeType::Individual);
-                        let o_type = if is_o_literal { NodeType::Literal } else { *node_types.get(&o).unwrap_or(&NodeType::Individual) };
-
-                        if !self.filters.show_literals && o_type == NodeType::Literal { continue; }
-                        if !self.filters.show_schema && (s_type == NodeType::Class || o_type == NodeType::Class || s_type == NodeType::Property) { continue; }
-                        if !self.filters.show_individuals && (s_type == NodeType::Individual || o_type == NodeType::Individual) { continue; }
-                        if !self.filters.show_system && is_system(&p) { continue; }
+                        if !seen_triples.insert(key) { continue; }
 
                         seen_nodes.insert(s.clone());
                         seen_nodes.insert(o.clone());
@@ -231,11 +253,7 @@ impl DarkstarApp {
 
         let mut new_node_count = 0;
         for uri in &seen_nodes {
-            let ntype = *node_types.get(uri).unwrap_or({
-                if uri.starts_with("l:") { &NodeType::Literal }
-                else if uri.starts_with("_:") || uri.starts_with("b:") { &NodeType::Blank }
-                else { &NodeType::Individual }
-            });
+            let ntype = classify_node(uri, &node_types);
             if let Some(node) = self.nodes.get_mut(uri) {
                 node.label = Self::get_label(uri);
                 node.node_type = ntype;

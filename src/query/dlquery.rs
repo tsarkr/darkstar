@@ -74,13 +74,13 @@ impl Ce {
 
 /// Lookup tables for resolving short names / labels and for evaluation.
 pub struct DlIndex {
-    /// local name (after last `#` or `/`) -> IRIs
+    /// schema local name (classes, properties, predicates) -> IRIs
     by_local: HashMap<String, Vec<String>>,
-    /// lowercased rdfs:label -> IRIs
-    by_label: HashMap<String, Vec<String>>,
+    /// extra `(iri, label)` pairs only for entities with >1 `rdfs:label`
+    extra_labels: Vec<(String, String)>,
     /// individuals (Darkstar term strings) = the universe for `not`, `only`, `max`
     pub individuals: HashSet<String>,
-    /// IRI -> first rdfs:label (for display)
+    /// IRI -> first rdfs:label (for display and on-demand label resolution)
     pub labels: HashMap<String, String>,
 }
 
@@ -91,39 +91,127 @@ fn local_name(iri: &str) -> &str {
 
 impl DlIndex {
     pub fn build(g: &FastGraph) -> Self {
-        let mut known = HashSet::new();
-        for t in g.triples().flatten() {
-            for term in [t.s(), t.p(), t.o()] {
-                if let Some(iri) = term.iri() {
-                    if !known.contains(iri.as_str()) { known.insert(iri.as_str().to_string()); }
+        use sophia::api::term::SimpleTerm;
+        let rdf_type = InferenceEngine::make_term(RDF_TYPE);
+        let meta: HashSet<&str> = META_TYPES.iter().copied().collect();
+        let mut schema_iris: HashSet<&str> = HashSet::new();
+        let mut schema_bnodes: HashSet<&str> = HashSet::new();
+        let mut typed_iris: HashSet<&str> = HashSet::with_capacity(64_000);
+        let mut typed_bnodes: HashSet<&str> = HashSet::new();
+
+        for t in g.triples_matching(Any, Some(&rdf_type), Any).flatten() {
+            let is_meta = matches!(t[2], SimpleTerm::Iri(o) if meta.contains(o.as_str()));
+            if let SimpleTerm::Iri(o_iri) = t[2] {
+                if !is_meta {
+                    schema_iris.insert(o_iri.as_str());
+                }
+            }
+            match t[0] {
+                SimpleTerm::Iri(iri) => {
+                    if is_meta { schema_iris.insert(iri.as_str()); } else { typed_iris.insert(iri.as_str()); }
+                }
+                SimpleTerm::BlankNode(b) => {
+                    if is_meta { schema_bnodes.insert(b.as_str()); } else { typed_bnodes.insert(b.as_str()); }
+                }
+                _ => {}
+            }
+        }
+
+        // Include all predicates and subClassOf/subPropertyOf participants in schema_iris
+        for p_term in g.predicates().flatten() {
+            if let SimpleTerm::Iri(iri) = p_term {
+                schema_iris.insert(iri.as_str());
+            }
+        }
+        let sco = InferenceEngine::make_term(RDFS_SUBCLASS);
+        for t in g.triples_matching(Any, Some(&sco), Any).flatten() {
+            if let SimpleTerm::Iri(s) = t[0] { schema_iris.insert(s.as_str()); }
+            if let SimpleTerm::Iri(o) = t[2] { schema_iris.insert(o.as_str()); }
+        }
+
+        let mut by_local: HashMap<String, Vec<String>> = HashMap::with_capacity(schema_iris.len());
+        for &iri in &schema_iris {
+            by_local.entry(local_name(iri).to_string()).or_default().push(iri.to_string());
+        }
+        for v in by_local.values_mut() {
+            if v.len() > 1 { v.sort_unstable(); v.dedup(); }
+        }
+
+        let mut individuals = HashSet::with_capacity(typed_iris.len() + typed_bnodes.len());
+        for iri in typed_iris {
+            if !schema_iris.contains(iri) {
+                let mut s = String::with_capacity(2 + iri.len());
+                s.push_str("i:");
+                s.push_str(iri);
+                individuals.insert(s);
+            }
+        }
+        for b in typed_bnodes {
+            if !schema_bnodes.contains(b) {
+                let mut s = String::with_capacity(2 + b.len());
+                s.push_str("b:");
+                s.push_str(b);
+                individuals.insert(s);
+            }
+        }
+
+        let label_p = InferenceEngine::make_term(RDFS_LABEL);
+        let mut labels: HashMap<String, String> = HashMap::with_capacity(individuals.len());
+        let mut extra_labels: Vec<(String, String)> = Vec::new();
+        for t in g.triples_matching(Any, Some(&label_p), Any).flatten() {
+            if let (SimpleTerm::Iri(s), Some(lex)) = (t[0], t[2].lexical_form()) {
+                let s_str = s.as_str();
+                if !labels.contains_key(s_str) {
+                    labels.insert(s_str.to_string(), lex.to_string());
+                } else {
+                    extra_labels.push((s_str.to_string(), lex.to_string()));
                 }
             }
         }
-        let mut by_local: HashMap<String, Vec<String>> = HashMap::new();
-        for iri in &known {
-            by_local.entry(local_name(iri).to_string()).or_default().push(iri.clone());
+
+        DlIndex { by_local, extra_labels, individuals, labels }
+    }
+
+    fn find_by_local(&self, target: &str) -> Vec<String> {
+        if let Some(c) = self.by_local.get(target) {
+            return c.clone();
         }
-        let mut by_label: HashMap<String, Vec<String>> = HashMap::new();
-        let mut labels = HashMap::new();
-        let label_p = InferenceEngine::make_term(RDFS_LABEL);
-        for t in g.triples_matching(Any, Some(&label_p), Any).flatten() {
-            if let (Some(s), Some(lex)) = (t.s().iri(), t.o().lexical_form()) {
-                by_label.entry(lex.to_lowercase()).or_default().push(s.as_str().to_string());
-                labels.entry(s.as_str().to_string()).or_insert_with(|| lex.to_string());
+        let mut matches: Vec<String> = self.individuals.iter()
+            .filter_map(|ind| ind.strip_prefix("i:"))
+            .filter(|&iri| local_name(iri) == target)
+            .map(|iri| iri.to_string())
+            .collect();
+        for iri in self.labels.keys() {
+            if local_name(iri) == target {
+                matches.push(iri.clone());
             }
         }
-        let rdf_type = InferenceEngine::make_term(RDF_TYPE);
-        let meta: HashSet<&str> = META_TYPES.iter().copied().collect();
-        let mut schema = HashSet::new();
-        let mut typed = HashSet::new();
-        for t in g.triples_matching(Any, Some(&rdf_type), Any).flatten() {
-            let s = extract_str(&t.s());
-            if t.o().iri().is_some_and(|o| meta.contains(o.as_str())) { schema.insert(s); } else { typed.insert(s); }
+        matches.sort_unstable();
+        matches.dedup();
+        matches
+    }
+
+    fn find_by_label(&self, target: &str) -> Vec<String> {
+        let target_lower = target.to_lowercase();
+        let eq_ci = |lbl: &str| -> bool {
+            if lbl.is_ascii() && target_lower.is_ascii() {
+                lbl.eq_ignore_ascii_case(&target_lower)
+            } else {
+                lbl == target_lower || lbl.to_lowercase() == target_lower
+            }
+        };
+        let mut matches: Vec<String> = self.labels.iter()
+            .filter(|(_, lbl)| eq_ci(lbl))
+            .map(|(iri, _)| iri.clone())
+            .collect();
+        for (iri, lbl) in &self.extra_labels {
+            if eq_ci(lbl) {
+                matches.push(iri.clone());
+            }
         }
-        let individuals = typed.into_iter().filter(|s| !schema.contains(s)).collect();
-        for v in by_local.values_mut() { v.sort(); v.dedup(); }
-        for v in by_label.values_mut() { v.sort(); v.dedup(); }
-        DlIndex { by_local, by_label, individuals, labels }
+        matches.sort_unstable();
+        matches.dedup();
+        matches
     }
 
     /// Resolves a name token to an IRI.
@@ -132,7 +220,12 @@ impl DlIndex {
             return Ok(iri.to_string());
         }
         if let Some(label) = name.strip_prefix('\'').and_then(|n| n.strip_suffix('\'')) {
-            return self.pick(name, self.by_label.get(&label.to_lowercase()).or_else(|| self.by_local.get(label)));
+            let by_lbl = self.find_by_label(label);
+            if !by_lbl.is_empty() {
+                return self.pick(name, Some(&by_lbl));
+            }
+            let by_loc = self.find_by_local(label);
+            return self.pick(name, Some(&by_loc));
         }
         if name == "Thing" { return Ok(OWL_THING.into()); }
         if name == "Nothing" { return Ok(OWL_NOTHING.into()); }
@@ -141,11 +234,17 @@ impl DlIndex {
                 return Ok(format!("{}{}", ns, local));
             }
             // Unknown prefix (Turtle prefixes are not kept after parsing): fall back to the local name.
-            if let Some(c) = self.by_local.get(local) {
-                return self.pick(name, Some(c));
+            let by_loc = self.find_by_local(local);
+            if !by_loc.is_empty() {
+                return self.pick(name, Some(&by_loc));
             }
         }
-        self.pick(name, self.by_local.get(name).or_else(|| self.by_label.get(&name.to_lowercase())))
+        let by_loc = self.find_by_local(name);
+        if !by_loc.is_empty() {
+            return self.pick(name, Some(&by_loc));
+        }
+        let by_lbl = self.find_by_label(name);
+        self.pick(name, Some(&by_lbl))
     }
 
     fn pick(&self, name: &str, cands: Option<&Vec<String>>) -> Result<String, String> {

@@ -405,7 +405,7 @@ impl DarkstarApp {
             // 4.1. Draw Edges and Badges
             let edge_groups = self.group_edges();
             for ((u_uri, v_uri), group) in edge_groups {
-                if let (Some(u), Some(v)) = (self.nodes.get(&u_uri), self.nodes.get(&v_uri)) {
+                if let (Some(u), Some(v)) = (self.nodes.get(u_uri), self.nodes.get(v_uri)) {
                     let pu = to_screen_pos(u.pos, self.graph_offset, self.graph_scale);
                     let pv = to_screen_pos(v.pos, self.graph_offset, self.graph_scale);
                     
@@ -746,11 +746,15 @@ impl DarkstarApp {
         });
     }
 
-    fn group_edges(&self) -> HashMap<(String, String), Vec<&crate::ui::GraphEdge>> {
-        let mut groups = HashMap::new();
+    fn group_edges(&self) -> HashMap<(&str, &str), Vec<&crate::ui::GraphEdge>> {
+        let mut groups: HashMap<(&str, &str), Vec<&crate::ui::GraphEdge>> = HashMap::new();
         for edge in &self.edges {
-            let pair = if edge.from < edge.to { (edge.from.clone(), edge.to.clone()) } else { (edge.to.clone(), edge.from.clone()) };
-            groups.entry(pair).or_insert(Vec::new()).push(edge);
+            let pair = if edge.from < edge.to {
+                (edge.from.as_str(), edge.to.as_str())
+            } else {
+                (edge.to.as_str(), edge.from.as_str())
+            };
+            groups.entry(pair).or_default().push(edge);
         }
         groups
     }

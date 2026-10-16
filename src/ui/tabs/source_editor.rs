@@ -84,17 +84,60 @@ impl DarkstarApp {
                 ui.add_space(4.0);
 
                 if self.source_preview.is_none() {
-                    let preview = self.manager.serialize_to_string(OntologyFormat::Turtle, false)
-                        .map(|full| {
+                    let preview = if !self.manager.is_dirty {
+                        self.manager.active_file_path.as_ref().and_then(|path| {
+                            use std::io::{BufRead, BufReader};
+                            let file = std::fs::File::open(path).ok()?;
+                            let reader = BufReader::new(file);
                             let mut out = String::new();
-                            for (n, line) in full.lines().enumerate() {
-                                if n >= SOURCE_PREVIEW_LINES { out.push_str("\n…"); break; }
-                                out.push_str(line);
-                                out.push('\n');
+                            for (n, line) in reader.lines().enumerate() {
+                                if n >= SOURCE_PREVIEW_LINES {
+                                    out.push_str("\n…");
+                                    break;
+                                }
+                                if let Ok(l) = line {
+                                    out.push_str(&l);
+                                    out.push('\n');
+                                }
                             }
-                            out
+                            Some(out)
                         })
-                        .unwrap_or_default();
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| {
+                        use sophia::api::prelude::*;
+                        let mut out = String::new();
+                        let mut lines = 0usize;
+                        for &(prefix, ns) in crate::vocab::STANDARD_PREFIXES {
+                            out.push_str(&format!("@prefix {}: <{}> .\n", prefix, ns));
+                            lines += 1;
+                        }
+                        if lines > 0 {
+                            out.push('\n');
+                            lines += 1;
+                        }
+                        for t in self.manager.memory.asserted_graph.triples().flatten() {
+                            if lines >= SOURCE_PREVIEW_LINES {
+                                out.push_str("\n…");
+                                break;
+                            }
+                            let fmt_term = |term: &sophia::api::term::SimpleTerm<'static>| -> String {
+                                if let Some(iri) = term.iri() {
+                                    format!("<{}>", iri.as_str())
+                                } else if let Some(bnode) = term.bnode_id() {
+                                    format!("_:{}", bnode.as_str())
+                                } else if let Some(lex) = term.lexical_form() {
+                                    format!("{:?}", lex.as_ref())
+                                } else {
+                                    "[]".to_string()
+                                }
+                            };
+                            out.push_str(&format!("{} {} {} .\n", fmt_term(t.s()), fmt_term(t.p()), fmt_term(t.o())));
+                            lines += 1;
+                        }
+                        out
+                    });
                     self.source_preview = Some(preview);
                 }
                 let mut preview: &str = self.source_preview.as_deref().unwrap_or("");

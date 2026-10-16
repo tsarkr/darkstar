@@ -44,20 +44,33 @@ impl DarkstarApp {
 
     pub fn render_property_hierarchy(&mut self, ui: &mut egui::Ui, filter_object: bool) {
         self.rebuild_properties_cache();
-        if !self.search_query.is_empty() { self.ensure_label_index(); }
+        let query = self.search_query.to_lowercase();
+        if !query.is_empty() { self.ensure_label_index(); }
 
         if filter_object {
             let roots = self.object_prop_roots.clone();
             let children_map = std::mem::take(&mut self.object_prop_children);
+            let visible = if query.is_empty() {
+                None
+            } else {
+                Some(self.compute_visible_hierarchy_nodes(&roots, &children_map, &query))
+            };
+            let mut path_visited = HashSet::new();
             for root in roots {
-                self.render_hierarchy_node(ui, &root, &children_map);
+                self.render_hierarchy_node_inner(ui, &root, &children_map, &query, visible.as_ref(), &mut path_visited);
             }
             self.object_prop_children = children_map;
         } else {
             let roots = self.datatype_prop_roots.clone();
             let children_map = std::mem::take(&mut self.datatype_prop_children);
+            let visible = if query.is_empty() {
+                None
+            } else {
+                Some(self.compute_visible_hierarchy_nodes(&roots, &children_map, &query))
+            };
+            let mut path_visited = HashSet::new();
             for root in roots {
-                self.render_hierarchy_node(ui, &root, &children_map);
+                self.render_hierarchy_node_inner(ui, &root, &children_map, &query, visible.as_ref(), &mut path_visited);
             }
             self.datatype_prop_children = children_map;
         }
@@ -65,16 +78,15 @@ impl DarkstarApp {
 }
 
 /// Root properties and `parent -> children` map for properties declared with `prop_type`
-/// (plus anything linked to them by rdfs:subPropertyOf). Lists are sorted.
+/// (plus anything linked to them by rdfs:subPropertyOf). Lists are transitively reduced and sorted.
 fn property_hierarchy(g: &crate::memory::DarkstarGraph, prop_type: &str) -> (Vec<String>, HashMap<String, Vec<String>>) {
     use sophia::api::term::matcher::Any;
     let rdfs_subprop_of = InferenceEngine::make_term(crate::vocab::RDFS_SUBPROPERTY_OF);
     let rdf_type = InferenceEngine::make_term(crate::vocab::RDF_TYPE);
     let target_type = InferenceEngine::make_term(prop_type);
 
-    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
     let mut all_props = HashSet::new();
-    let mut has_parent = HashSet::new();
+    let mut raw_edges = Vec::new();
     for t in g.triples_matching(Any, Some(&rdf_type), Some(&target_type)).flatten() {
         all_props.insert(crate::rules::extract_str(&t.s()));
     }
@@ -82,14 +94,12 @@ fn property_hierarchy(g: &crate::memory::DarkstarGraph, prop_type: &str) -> (Vec
         let child = crate::rules::extract_str(&t.s());
         let parent = crate::rules::extract_str(&t.o());
         if all_props.contains(&child) || all_props.contains(&parent) {
-            children_map.entry(parent.clone()).or_default().push(child.clone());
             all_props.insert(child.clone());
-            all_props.insert(parent);
-            has_parent.insert(child);
+            all_props.insert(parent.clone());
+            if child != parent {
+                raw_edges.push((child, parent));
+            }
         }
     }
-    let mut roots: Vec<_> = all_props.into_iter().filter(|p| !has_parent.contains(p)).collect();
-    roots.sort();
-    for children in children_map.values_mut() { children.sort_unstable(); children.dedup(); }
-    (roots, children_map)
+    crate::ui::tabs::classes::build_reduced_hierarchy(all_props, raw_edges)
 }

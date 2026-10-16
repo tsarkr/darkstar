@@ -8,7 +8,8 @@ impl DarkstarApp {
         if !self.show_settings { return; }
         let i = self.i18n();
         let mut show = self.show_settings;
-        let mut changed = false;
+        let mut ui_changed = false;
+        let mut rules_changed = false;
         let mut close_clicked = false;
         
         egui::Window::new(i.settings_title)
@@ -19,11 +20,11 @@ impl DarkstarApp {
                 ui.vertical(|ui| {
                     ui.group(|ui| {
                         ui.label(egui::RichText::new(i.appearance).strong());
-                        if ui.checkbox(&mut self.settings.theme_dark, i.theme_dark).changed() { changed = true; }
+                        if ui.checkbox(&mut self.settings.theme_dark, i.theme_dark).changed() { ui_changed = true; }
                         ui.horizontal(|ui| {
                             ui.label(i.ui_scale);
                             if ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.5..=2.0)).changed() {
-                                changed = true;
+                                ui_changed = true;
                             }
                             if ui.button(i.apply).clicked() {
                                 let native_pp = ctx.native_pixels_per_point().unwrap_or(1.0);
@@ -33,7 +34,7 @@ impl DarkstarApp {
                                 self.settings.ui_scale = 1.0;
                                 let native_pp = ctx.native_pixels_per_point().unwrap_or(1.0);
                                 ctx.set_pixels_per_point(native_pp);
-                                changed = true;
+                                ui_changed = true;
                             }
                         });
                         ui.horizontal(|ui| {
@@ -45,19 +46,19 @@ impl DarkstarApp {
                                     ui.selectable_value(&mut self.settings.language, crate::core::settings::Language::English, "English");
                                     ui.selectable_value(&mut self.settings.language, crate::core::settings::Language::Korean, "한국어");
                                 });
-                            if self.settings.language != old_lang { changed = true; }
+                            if self.settings.language != old_lang { ui_changed = true; }
                         });
                     });
                     
                     ui.add_space(10.0);
                     ui.group(|ui| {
                         ui.label(egui::RichText::new(i.rules_title).strong());
-                        if ui.checkbox(&mut self.settings.enabled_rules.equality, i.eq_rules).changed() { changed = true; }
-                        if ui.checkbox(&mut self.settings.enabled_rules.property_chains, i.chain_rules).changed() { changed = true; }
-                        if ui.checkbox(&mut self.settings.enabled_rules.class_expressions, i.exp_rules).changed() { changed = true; }
-                        if ui.checkbox(&mut self.settings.enabled_rules.restrictions, i.restr_rules).changed() { changed = true; }
-                        if ui.checkbox(&mut self.settings.enabled_rules.datatypes, i.dt_rules).changed() { changed = true; }
-                        if ui.checkbox(&mut self.settings.enabled_rules.schema, i.scm_rules).changed() { changed = true; }
+                        if ui.checkbox(&mut self.settings.enabled_rules.equality, i.eq_rules).changed() { rules_changed = true; }
+                        if ui.checkbox(&mut self.settings.enabled_rules.property_chains, i.chain_rules).changed() { rules_changed = true; }
+                        if ui.checkbox(&mut self.settings.enabled_rules.class_expressions, i.exp_rules).changed() { rules_changed = true; }
+                        if ui.checkbox(&mut self.settings.enabled_rules.restrictions, i.restr_rules).changed() { rules_changed = true; }
+                        if ui.checkbox(&mut self.settings.enabled_rules.datatypes, i.dt_rules).changed() { rules_changed = true; }
+                        if ui.checkbox(&mut self.settings.enabled_rules.schema, i.scm_rules).changed() { rules_changed = true; }
                     });
 
                     ui.add_space(10.0);
@@ -68,9 +69,17 @@ impl DarkstarApp {
             });
         
         if close_clicked { show = false; }
-        if changed {
+        if ui_changed || rules_changed {
             self.settings.save();
-            self.manager.is_dirty = true;
+        }
+        if rules_changed {
+            self.manager.invalidate_reasoning();
+            if self.auto_reasoning {
+                let _ = self.manager.run_reasoning(&self.settings.enabled_rules);
+            }
+            self.classes_cache_dirty = true;
+            self.properties_cache_dirty = true;
+            self.individuals_cache_dirty = true;
             self.graph_needs_sync = true;
         }
         self.show_settings = show;

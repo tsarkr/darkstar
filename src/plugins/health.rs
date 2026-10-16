@@ -43,70 +43,86 @@ impl HealthCheckerPlugin {
         }
     }
 
-    fn run_check(&mut self, manager: &DarkstarManager) {
+    pub fn run_check(&mut self, manager: &DarkstarManager) {
+        use sophia::api::term::matcher::Any;
         self.isolated_nodes.clear();
         self.missing_labels.clear();
         self.empty_classes.clear();
 
-        let mut all_entities = HashSet::new();
-        let mut connected_entities = HashSet::new();
-        let mut has_label = HashSet::new();
-        let mut class_with_instances = HashSet::new();
-        let mut classes = Vec::new();
-
+        let g = &manager.memory.main_graph;
         let rdf_type = InferenceEngine::make_term(crate::vocab::RDF_TYPE);
         let rdfs_label = InferenceEngine::make_term(crate::vocab::RDFS_LABEL);
         let owl_class = InferenceEngine::make_term(crate::vocab::OWL_CLASS);
 
-        for t in manager.memory.main_graph.triples().flatten() {
-            let s = crate::rules::extract_str(&t.s());
-            let o_is_literal = t.o().kind() == sophia::api::term::TermKind::Literal;
-            let is_type = rdf_type == t.p();
-            // Literal objects never become entities, so skip allocating a string for them
-            // unless it is needed (it never is for literals).
-            let o = if o_is_literal { String::new() } else { crate::rules::extract_str(&t.o()) };
+        let mut connected_entities: HashSet<&str> = HashSet::with_capacity(64_000);
+        let mut type_only_entities: HashSet<&str> = HashSet::new();
 
-            if !s.starts_with("l:") && !all_entities.contains(&s) { all_entities.insert(s.clone()); }
-            if !o_is_literal && !all_entities.contains(&o) { all_entities.insert(o.clone()); }
-
-            // Check connections (excluding rdf:type)
+        use sophia::api::term::SimpleTerm;
+        for t in g.triples().flatten() {
+            let is_type = &rdf_type == t[1];
             if !is_type {
-                if !connected_entities.contains(&s) { connected_entities.insert(s.clone()); }
-                if !o_is_literal && !connected_entities.contains(&o) { connected_entities.insert(o.clone()); }
-            }
-
-            // Check labels
-            if is_type && owl_class == t.o() {
-                classes.push(s.clone());
-            }
-
-            if rdfs_label == t.p() {
-                has_label.insert(s);
-            } else if is_type && !o_is_literal {
-                class_with_instances.insert(o);
-            }
-        }
-
-        // 1. Isolated Nodes
-        for entity in &all_entities {
-            if !connected_entities.contains(entity) && !entity.starts_with("_:") {
-                self.isolated_nodes.push(entity.clone());
-            }
-        }
-
-        // 2. Missing Labels
-        for entity in &all_entities {
-            if !has_label.contains(entity) && !entity.starts_with("_:") {
-                self.missing_labels.push(entity.clone());
+                if let SimpleTerm::Iri(s_iri) = t[0] {
+                    connected_entities.insert(s_iri.as_str());
+                }
+                if let SimpleTerm::Iri(o_iri) = t[2] {
+                    connected_entities.insert(o_iri.as_str());
+                }
+            } else {
+                if let SimpleTerm::Iri(s_iri) = t[0] {
+                    let s = s_iri.as_str();
+                    if !connected_entities.contains(s) {
+                        type_only_entities.insert(s);
+                    }
+                }
+                if let SimpleTerm::Iri(o_iri) = t[2] {
+                    let o = o_iri.as_str();
+                    if !connected_entities.contains(o) {
+                        type_only_entities.insert(o);
+                    }
+                }
             }
         }
 
-        // 3. Empty Classes
-        for class_uri in classes {
-            if !class_with_instances.contains(&class_uri) {
-                self.empty_classes.push(class_uri);
+        let mut has_label: HashSet<&str> = HashSet::with_capacity(connected_entities.len());
+        for t in g.triples_matching(Any, Some(&rdfs_label), Any).flatten() {
+            if let SimpleTerm::Iri(s_iri) = t[0] {
+                has_label.insert(s_iri.as_str());
             }
         }
+
+        // 1. Isolated Nodes & 2. Missing Labels
+        for &entity in &connected_entities {
+            if !has_label.contains(entity) {
+                let mut s = String::with_capacity(2 + entity.len());
+                s.push_str("i:");
+                s.push_str(entity);
+                self.missing_labels.push(s);
+            }
+        }
+        for &entity in &type_only_entities {
+            if !connected_entities.contains(entity) {
+                let mut s = String::with_capacity(2 + entity.len());
+                s.push_str("i:");
+                s.push_str(entity);
+                if !has_label.contains(entity) {
+                    self.missing_labels.push(s.clone());
+                }
+                self.isolated_nodes.push(s);
+            }
+        }
+        self.isolated_nodes.sort_unstable();
+        self.missing_labels.sort_unstable();
+
+        // 3. Empty Classes (indexed check per class)
+        for t in g.triples_matching(Any, Some(&rdf_type), Some(&owl_class)).flatten() {
+            if t.s().iri().is_some() {
+                let c_term = t.s();
+                if g.triples_matching(Any, Some(&rdf_type), Some(c_term)).next().is_none() {
+                    self.empty_classes.push(crate::rules::extract_str(&c_term));
+                }
+            }
+        }
+        self.empty_classes.sort_unstable();
     }
 }
 
