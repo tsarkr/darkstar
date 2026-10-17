@@ -48,6 +48,12 @@
   .stat b { display: block; font-size: 1.7rem; color: var(--gold); }
   .stat span { font-size: .85rem; color: var(--mut); }
   section { padding: 5rem 0 1rem; }
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; max-width: 1120px; margin: 0 auto; padding: 0 1.5rem; }
+  .shots figure { margin: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--card); }
+  .shots img { width: 100%; display: block; }
+  .shots figcaption { padding: .9rem 1.2rem; font-size: .88rem; color: var(--mut); }
+  @media (max-width: 700px) { .shots { grid-template-columns: 1fr; } }
+
   section h2 { font-size: 2.1rem; text-align: center; letter-spacing: -.5px; margin-bottom: .7rem; }
   section .sub { text-align: center; color: var(--mut); margin-bottom: 3rem; max-width: 640px; margin-left: auto; margin-right: auto; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.2rem; }
@@ -106,6 +112,22 @@
       <div class="stat"><b>EN · 한</b><span>bilingual UI</span></div>
     </div>
   </div>
+
+
+  <section id="screenshots">
+    <h2>See it in action</h2>
+    <p class="sub">Real screenshots from the running application — dark, fast, and native.</p>
+    <div class="shots">
+      <figure>
+        <img src="assets/screenshot-main.png" alt="Darkstar main interface with graph view, class hierarchy and property editor">
+        <figcaption><b>Main workspace</b> — class hierarchy, force-directed graph view, and property editor in one window.</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/screenshot-sparql.png" alt="Darkstar SPARQL query editor with example query">
+        <figcaption><b>SPARQL 1.1 editor</b> — write and run queries with example templates and inference toggle.</figcaption>
+      </figure>
+    </div>
+  </section>
 
   <section id="features">
     <h2>Everything an ontologist needs</h2>
