@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Darkstar — Professional OWL 2 RL Ontology Editor</title>
+<meta name="description" content="Darkstar is a high-performance, professional-grade OWL 2 RL ontology editor and inference engine built with Rust. Real-time reasoning, SPARQL 1.1, stunning graph visualization.">
+<style>
+  :root {
+    --bg: #060913; --bg2: #0b1120; --card: #101828; --line: #1e2a44;
+    --gold: #f5b942; --gold2: #ffd97a; --blue: #5eb1ff; --txt: #e8eef7; --mut: #93a1bb;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif; background: var(--bg); color: var(--txt); line-height: 1.65; overflow-x: hidden; }
+  a { color: inherit; }
+  .stars { position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background-image: radial-gradient(1px 1px at 12% 22%, #fff 60%, transparent),
+                      radial-gradient(1px 1px at 68% 8%, #fff 60%, transparent),
+                      radial-gradient(1.5px 1.5px at 42% 64%, #cfe4ff 60%, transparent),
+                      radial-gradient(1px 1px at 84% 42%, #fff 60%, transparent),
+                      radial-gradient(1px 1px at 28% 84%, #fff 60%, transparent),
+                      radial-gradient(1.5px 1.5px at 76% 76%, #ffe9b8 60%, transparent),
+                      radial-gradient(1px 1px at 55% 30%, #fff 60%, transparent),
+                      radial-gradient(1px 1px at 8% 58%, #fff 60%, transparent),
+                      radial-gradient(1px 1px at 92% 14%, #fff 60%, transparent),
+                      radial-gradient(1px 1px at 36% 8%, #fff 60%, transparent); }
+  nav { position: sticky; top: 0; z-index: 20; backdrop-filter: blur(12px); background: rgba(6,9,19,.78); border-bottom: 1px solid var(--line); }
+  nav .in { max-width: 1120px; margin: 0 auto; padding: .9rem 1.5rem; display: flex; align-items: center; justify-content: space-between; }
+  .brand { font-weight: 800; font-size: 1.15rem; letter-spacing: .5px; display: flex; align-items: center; gap: .55rem; text-decoration: none; }
+  .brand .dot { width: 11px; height: 11px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, var(--gold2), var(--gold) 70%); box-shadow: 0 0 14px var(--gold); }
+  nav .links { display: flex; gap: 1.6rem; font-size: .92rem; color: var(--mut); }
+  nav .links a { text-decoration: none; } nav .links a:hover { color: var(--txt); }
+  .ghbtn { border: 1px solid var(--line); border-radius: 8px; padding: .45rem 1rem; font-size: .88rem; text-decoration: none; color: var(--txt); background: var(--card); }
+  .ghbtn:hover { border-color: var(--gold); }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 1.5rem; position: relative; z-index: 1; }
+  .hero { text-align: center; padding: 6.5rem 0 4.5rem; }
+  .pill { display: inline-block; font-size: .78rem; letter-spacing: 1.5px; text-transform: uppercase; color: var(--gold); border: 1px solid rgba(245,185,66,.35); border-radius: 30px; padding: .35rem 1.1rem; margin-bottom: 1.6rem; background: rgba(245,185,66,.06); }
+  .hero h1 { font-size: 3.4rem; line-height: 1.15; font-weight: 800; letter-spacing: -1px; margin-bottom: 1.2rem; }
+  .hero h1 .hl { background: linear-gradient(100deg, var(--gold2), var(--gold)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .hero p { color: var(--mut); font-size: 1.18rem; max-width: 680px; margin: 0 auto 2.4rem; }
+  .cta { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+  .btn { display: inline-block; padding: .95rem 2.2rem; border-radius: 10px; font-weight: 700; text-decoration: none; font-size: 1rem; transition: transform .15s; }
+  .btn:hover { transform: translateY(-2px); }
+  .btn.gold { background: linear-gradient(100deg, var(--gold2), var(--gold)); color: #1a1206; }
+  .btn.ghost { border: 1px solid var(--line); color: var(--txt); background: rgba(255,255,255,.03); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; margin: 3.5rem 0 0; }
+  .stat { background: var(--bg2); padding: 1.6rem 1rem; text-align: center; }
+  .stat b { display: block; font-size: 1.7rem; color: var(--gold); }
+  .stat span { font-size: .85rem; color: var(--mut); }
+  section { padding: 5rem 0 1rem; }
+  section h2 { font-size: 2.1rem; text-align: center; letter-spacing: -.5px; margin-bottom: .7rem; }
+  section .sub { text-align: center; color: var(--mut); margin-bottom: 3rem; max-width: 640px; margin-left: auto; margin-right: auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.2rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 1.9rem; transition: border-color .2s, transform .2s; }
+  .card:hover { border-color: rgba(245,185,66,.5); transform: translateY(-3px); }
+  .card .ic { font-size: 1.9rem; margin-bottom: .9rem; }
+  .card h3 { font-size: 1.12rem; margin-bottom: .55rem; }
+  .card p { color: var(--mut); font-size: .93rem; }
+  .card code { color: var(--blue); font-size: .85em; }
+  .who { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.2rem; }
+  .who div { border-left: 3px solid var(--gold); padding: .4rem 0 .4rem 1.1rem; }
+  .who h3 { font-size: 1.02rem; margin-bottom: .3rem; }
+  .who p { color: var(--mut); font-size: .9rem; }
+  .stack { display: flex; flex-wrap: wrap; gap: .7rem; justify-content: center; }
+  .stack span { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: .5rem 1.1rem; font-size: .88rem; color: var(--mut); }
+  .stack span b { color: var(--txt); }
+  .dl { background: linear-gradient(135deg, #0d1526, #131c33); border: 1px solid var(--line); border-radius: 20px; text-align: center; padding: 4rem 2rem; margin-top: 2rem; }
+  .dl h2 { margin-bottom: 1rem; }
+  .dl p { color: var(--mut); margin-bottom: 2rem; }
+  .oses { display: flex; gap: .8rem; justify-content: center; flex-wrap: wrap; margin-top: 1.6rem; font-size: .85rem; color: var(--mut); }
+  .oses span { border: 1px solid var(--line); border-radius: 20px; padding: .3rem 1rem; }
+  footer { border-top: 1px solid var(--line); margin-top: 5rem; padding: 2.2rem 0; text-align: center; color: var(--mut); font-size: .88rem; position: relative; z-index: 1; }
+  footer a { color: var(--gold); }
+  @media (max-width: 640px) { .hero h1 { font-size: 2.3rem; } nav .links { display: none; } }
+</style>
+</head>
+<body>
+<div class="stars"></div>
+
+<nav>
+  <div class="in">
+    <a class="brand" href="#"><span class="dot"></span>Darkstar</a>
+    <div class="links">
+      <a href="#features">Features</a>
+      <a href="#who">Who it's for</a>
+      <a href="#stack">Tech</a>
+      <a href="#download">Download</a>
+    </div>
+    <a class="ghbtn" href="https://github.com/tsarkr/darkstar">★ GitHub</a>
+  </div>
+</nav>
+
+<div class="wrap">
+  <div class="hero">
+    <div class="pill">OWL 2 RL &nbsp;·&nbsp; Rust &nbsp;·&nbsp; Open Source</div>
+    <h1>The ontology editor<br>that <span class="hl">thinks as fast</span> as you do.</h1>
+    <p>Darkstar is a professional-grade OWL 2 RL ontology editor and inference engine. Parallel reasoning, one-click explanations, SPARQL 1.1, and breathtaking graph visualization — in a single blazing-fast native app.</p>
+    <div class="cta">
+      <a class="btn gold" href="https://github.com/tsarkr/darkstar/releases">Download Darkstar</a>
+      <a class="btn ghost" href="https://github.com/tsarkr/darkstar">View on GitHub</a>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>Rust</b><span>native performance</span></div>
+      <div class="stat"><b>OWL 2 RL</b><span>full compliance</span></div>
+      <div class="stat"><b>6</b><span>graph layouts</span></div>
+      <div class="stat"><b>EN · 한</b><span>bilingual UI</span></div>
+    </div>
+  </div>
+
+  <section id="features">
+    <h2>Everything an ontologist needs</h2>
+    <p class="sub">No plugins required for the essentials. No Electron. No waiting.</p>
+    <div class="grid">
+      <div class="card"><div class="ic">🧠</div><h3>Parallel Reasoning Engine</h3><p>Full OWL 2 RL forward-chaining inference powered by <code>Rayon</code>. Watch thousands of triples materialize in real time.</p></div>
+      <div class="card"><div class="ic">🔎</div><h3>Inference Explanations</h3><p>Every inferred triple, proven. Trace exactly which rules and premises produced it in the dedicated justification view.</p></div>
+      <div class="card"><div class="ic">📝</div><h3>SPARQL 1.1 + DL Query</h3><p>Full SPARQL 1.1 (BGP, FILTER, OPTIONAL, aggregates) and Manchester Syntax class expressions like <code>hasChild some Person</code>.</p></div>
+      <div class="card"><div class="ic">🌌</div><h3>Stunning Graph Visualization</h3><p>Six layout algorithms, physics simulation with collision avoidance, curved bidirectional edges — at a smooth 60 FPS.</p></div>
+      <div class="card"><div class="ic">🧩</div><h3>Dynamic Plugins</h3><p>Load native plugins at runtime (<code>.dylib</code> / <code>.so</code> / <code>.dll</code>). Extend tabs, analysis, and transforms without recompiling.</p></div>
+      <div class="card"><div class="ic">📂</div><h3>Multi-Format I/O</h3><p>Turtle, RDF/XML, N-Triples. Recursive <code>owl:imports</code> resolution, full undo/redo history, consistency checking.</p></div>
+    </div>
+  </section>
+
+  <section id="who">
+    <h2>Built for people who model the world</h2>
+    <p class="sub">From enterprise knowledge graphs to digital humanities.</p>
+    <div class="who">
+      <div><h3>Knowledge Engineers</h3><p>Design and validate production ontologies with instant reasoning feedback.</p></div>
+      <div><h3>Researchers</h3><p>Explore linked data and publish reproducible, explainable inferences.</p></div>
+      <div><h3>Digital Humanities</h3><p>Model cultural heritage data — CIDOC-CRM friendly, bilingual by design.</p></div>
+      <div><h3>Students</h3><p>Learn description logic visually: see every inference explained, step by step.</p></div>
+    </div>
+  </section>
+
+  <section id="stack">
+    <h2>Serious engineering, zero bloat</h2>
+    <p class="sub">A single native binary. No runtime to install.</p>
+    <div class="stack">
+      <span><b>Rust</b> 2021</span><span><b>egui</b> native UI</span><span><b>Rayon</b> parallelism</span><span><b>Oxigraph</b> SPARQL</span><span><b>Sophia</b> RDF</span><span><b>Tokio</b> async</span>
+    </div>
+  </section>
+
+  <section id="download">
+    <div class="dl">
+      <h2>Ready to map your universe?</h2>
+      <p>Free and open source. Download the latest release and open your first ontology in minutes.</p>
+      <div class="cta">
+        <a class="btn gold" href="https://github.com/tsarkr/darkstar/releases">Get the latest release</a>
+        <a class="btn ghost" href="https://github.com/tsarkr/darkstar">Star on GitHub ★</a>
+      </div>
+      <div class="oses"><span>macOS</span><span>Linux</span><span>Windows</span></div>
+    </div>
+  </section>
+</div>
+
+<footer>
+  Darkstar is open source by <a href="https://github.com/tsarkr">Gyungmin (tsarkr)</a> · Built with Rust 🦀<br>
+  <span style="opacity:.7">Questions or enterprise support? Open an issue on GitHub.</span>
+</footer>
+
+</body>
+</html>
